@@ -1,0 +1,150 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum ContactStatus {
+  NOVO_LEAD
+  ALUNO
+  EX_ALUNO
+  BLOQUEADO
+}
+
+enum ConversationStatus {
+  AI_ACTIVE
+  HUMAN_ACTIVE
+}
+
+enum MessageDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+model Contact {
+  id                        String        @id @default(cuid())
+  phone                     String        @unique
+  name                      String?
+  status                    ContactStatus @default(NOVO_LEAD)
+  dog_name                  String?
+  dog_age                   String?
+  dog_size                  String?
+  city                      String?
+  main_problem              String?
+  lead_temperature          String?       // cold, warm, hot
+  conversation_stage        String?       // greeting, qualification, service_presentation, closing, transferred
+  automatic_service_enabled Boolean       @default(true)
+  created_at                DateTime      @default(now())
+  updated_at                DateTime      @updatedAt
+
+  conversations             Conversation[]
+  messages                  Message[]
+  lead_data                 LeadData[]
+
+  @@map("contacts")
+}
+
+model Conversation {
+  id              String             @id @default(cuid())
+  contact_id      String
+  contact         Contact            @relation(fields: [contact_id], references: [id], onDelete: Cascade)
+  status          ConversationStatus @default(AI_ACTIVE)
+  transfer_reason String?            // USER_REQUEST, EXISTING_STUDENT, EX_STUDENT, etc.
+  created_at      DateTime           @default(now())
+  updated_at      DateTime           @updatedAt
+
+  messages        Message[]
+  buffer_items    MessageBuffer[]
+  ai_logs         AiLog[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id                  String           @id @default(cuid())
+  conversation_id     String
+  conversation        Conversation     @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  contact_id          String
+  contact             Contact          @relation(fields: [contact_id], references: [id], onDelete: Cascade)
+  external_message_id String?          @unique
+  direction           MessageDirection
+  message_type        String           @default("text") // text, audio, image
+  content             String
+  ai_generated        Boolean          @default(false)
+  processing_status   ProcessingStatus @default(PENDING)
+  created_at          DateTime         @default(now())
+
+  buffer_item         MessageBuffer?
+
+  @@map("messages")
+}
+
+model MessageBuffer {
+  id              String           @id @default(cuid())
+  conversation_id String
+  conversation    Conversation     @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  message_id      String           @unique
+  message         Message          @relation(fields: [message_id], references: [id], onDelete: Cascade)
+  status          ProcessingStatus @default(PENDING)
+  created_at      DateTime         @default(now())
+  processed_at    DateTime?
+
+  @@map("message_buffer")
+}
+
+model LeadData {
+  id         String   @id @default(cuid())
+  contact_id String
+  contact    Contact  @relation(fields: [contact_id], references: [id], onDelete: Cascade)
+  field      String
+  value      String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@unique([contact_id, field])
+  @@map("lead_data")
+}
+
+model AiConfig {
+  id            String   @id @default(cuid())
+  system_prompt String
+  model         String   @default("gemini-2.5-flash")
+  temperature   Float    @default(0.7)
+  max_tokens    Int      @default(800)
+  active        Boolean  @default(true)
+  updated_at    DateTime @updatedAt
+
+  @@map("ai_config")
+}
+
+model Settings {
+  id         String   @id @default(cuid())
+  key        String   @unique
+  value      String
+  updated_at DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model AiLog {
+  id              String        @id @default(cuid())
+  conversation_id String?
+  conversation    Conversation? @relation(fields: [conversation_id], references: [id], onDelete: SetNull)
+  request         String
+  response        String?
+  success         Boolean
+  error           String?
+  created_at      DateTime      @default(now())
+
+  @@map("ai_logs")
+}
