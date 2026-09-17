@@ -37,10 +37,30 @@ export type Message = {
 
 // Verifica se há conexão com PostgreSQL (Vercel Postgres / Neon)
 export function getPostgresUrl(): string | null {
-  const url = process.env.POSTGRES_URL || process.env.DATABASE_URL || '';
-  if (url.startsWith('postgres://') || url.startsWith('postgresql://')) {
-    return url;
+  // Lista de variáveis mais comuns da Vercel
+  const candidates = [
+    process.env.POSTGRES_URL,
+    process.env.STORAGE_URL,
+    process.env.STORAGE_POSTGRES_URL,
+    process.env.DATABASE_URL,
+    process.env.POSTGRES_PRISMA_URL,
+    process.env.STORAGE_PRISMA_URL,
+    process.env.POSTGRES_URL_NON_POOLING
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && (candidate.startsWith('postgres://') || candidate.startsWith('postgresql://'))) {
+      return candidate;
+    }
   }
+
+  // Varredura de fallback para qualquer variável de ambiente com prefixo postgres://
+  for (const [key, val] of Object.entries(process.env)) {
+    if (typeof val === 'string' && (val.startsWith('postgres://') || val.startsWith('postgresql://'))) {
+      return val;
+    }
+  }
+
   return null;
 }
 
