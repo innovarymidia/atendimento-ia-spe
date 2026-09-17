@@ -3,11 +3,12 @@ import { Contact, Message } from './db';
 
 import { getAllSettings } from './settings-sync';
 
-function getGeminiClient(): GoogleGenAI {
-  const settings = getAllSettings();
+async function getGeminiClient(): Promise<GoogleGenAI> {
+  const settings = await getAllSettings();
   const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY || '';
   return new GoogleGenAI({ apiKey });
 }
+
 
 
 /**
@@ -145,7 +146,7 @@ Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSO
 `;
 
   try {
-    const ai = getGeminiClient();
+    const ai = await getGeminiClient();
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [

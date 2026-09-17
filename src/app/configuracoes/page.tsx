@@ -13,7 +13,9 @@ import {
   Eye,
   EyeOff,
   Sparkles,
-  ShieldCheck
+  ShieldCheck,
+  Database,
+  Cloud
 } from 'lucide-react';
 
 export default function ConfiguracoesPage() {
@@ -23,6 +25,10 @@ export default function ConfiguracoesPage() {
   const [copied, setCopied] = useState<boolean>(false);
   const [showGeminiKey, setShowGeminiKey] = useState<boolean>(false);
   const [showEvolutionKey, setShowEvolutionKey] = useState<boolean>(false);
+  const [storageInfo, setStorageInfo] = useState<{ isPostgres: boolean; type: string }>({
+    isPostgres: false,
+    type: 'SQLite Local'
+  });
 
   // Formulário de configurações
   const [globalAi, setGlobalAi] = useState<boolean>(true);
@@ -63,6 +69,9 @@ export default function ConfiguracoesPage() {
       if (data?.evolutionStatus) {
         setEvolutionStatus(data.evolutionStatus);
       }
+      if (data?.storage) {
+        setStorageInfo(data.storage);
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -91,7 +100,8 @@ export default function ConfiguracoesPage() {
       });
       const data = await res.json();
       if (res.ok) {
-        setFeedbackMsg('✓ Configurações salvas e persistidas no banco e no arquivo .env com sucesso!');
+        setFeedbackMsg(data.message || '✓ Configurações salvas e persistidas com sucesso!');
+        if (data?.storage) setStorageInfo(data.storage);
         setTimeout(() => setFeedbackMsg(''), 5000);
       } else {
         setFeedbackMsg('Erro ao salvar: ' + (data.error || 'Erro desconhecido'));
@@ -138,8 +148,38 @@ export default function ConfiguracoesPage() {
           </span>
         </div>
         <p className="text-sm text-slate-400 mt-1">
-          Todas as alterações feitas aqui são gravadas no banco de dados e sincronizadas diretamente no arquivo <code>.env</code>
+          Configurações do atendimento, inteligência artificial, WhatsApp e persistência
         </p>
+      </div>
+
+      {/* Status do Armazenamento e Guia Vercel */}
+      <div className={`p-4 rounded-xl border flex flex-col md:flex-row items-start md:items-center justify-between gap-4 ${
+        storageInfo.isPostgres
+          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          : 'bg-slate-850 border-slate-700 text-slate-300'
+      }`}>
+        <div className="flex items-start space-x-3">
+          <Database className={`w-5 h-5 shrink-0 mt-0.5 ${storageInfo.isPostgres ? 'text-emerald-400' : 'text-blue-400'}`} />
+          <div>
+            <div className="flex items-center space-x-2">
+              <span className="font-bold text-white text-xs">
+                Armazenamento Ativo: {storageInfo.type}
+              </span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                storageInfo.isPostgres
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+              }`}>
+                {storageInfo.isPostgres ? 'Nuvem Vercel Permanente' : 'Ambiente Local'}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+              {storageInfo.isPostgres
+                ? 'Conectado ao Vercel Postgres / Neon. Todos os contatos, configurações e mensagens são gravados permanentemente na nuvem.'
+                : 'Para persistência definitiva na Vercel: adicione o Vercel Postgres no seu projeto (Vercel > Storage > Create Database > Postgres/Neon). Ao conectar, a Vercel cria a variável POSTGRES_URL e todos os dados ficam salvos para sempre na nuvem!'}
+            </p>
+          </div>
+        </div>
       </div>
 
       {feedbackMsg && (

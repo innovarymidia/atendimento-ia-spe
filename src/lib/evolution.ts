@@ -2,24 +2,22 @@ import axios from 'axios';
 import { cleanPhoneNumber } from './phone';
 import { getDb } from './db';
 
-function getEvolutionConfig() {
-  const db = getDb();
-  const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
-  
-  const urlRow = getSetting.get('evolutionUrl') as { value: string } | undefined;
-  const keyRow = getSetting.get('evolutionApiKey') as { value: string } | undefined;
-  const instRow = getSetting.get('evolutionInstance') as { value: string } | undefined;
+import { getAllSettings } from './settings-sync';
 
+async function getEvolutionConfig() {
+  const settings = await getAllSettings();
+  
   return {
-    baseUrl: (urlRow?.value || process.env.EVOLUTION_API_URL || 'https://evolution-api-yweq.onrender.com').replace(/\/$/, ''),
-    apiKey: keyRow?.value || process.env.EVOLUTION_API_KEY || 'Innovary@2026#WhatsAppAPI',
-    instance: instRow?.value || process.env.EVOLUTION_INSTANCE_NAME || 'SPE'
+    baseUrl: (settings.evolutionUrl || process.env.EVOLUTION_API_URL || 'https://evolution-api-yweq.onrender.com').replace(/\/$/, ''),
+    apiKey: settings.evolutionApiKey || process.env.EVOLUTION_API_KEY || 'Innovary@2026#WhatsAppAPI',
+    instance: settings.evolutionInstance || process.env.EVOLUTION_INSTANCE_NAME || 'SPE'
   };
 }
 
+
 export async function sendWhatsAppText(toPhone: string, text: string): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
-    const { baseUrl, apiKey, instance } = getEvolutionConfig();
+    const { baseUrl, apiKey, instance } = await getEvolutionConfig();
     const phone = cleanPhoneNumber(toPhone);
 
     const endpoint = `${baseUrl}/message/sendText/${instance}`;
@@ -60,7 +58,7 @@ export async function sendWhatsAppMedia(
   caption?: string
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
-    const { baseUrl, apiKey, instance } = getEvolutionConfig();
+    const { baseUrl, apiKey, instance } = await getEvolutionConfig();
     const phone = cleanPhoneNumber(toPhone);
 
     const endpoint = `${baseUrl}/message/sendMedia/${instance}`;
@@ -95,7 +93,7 @@ export async function sendWhatsAppMedia(
 
 export async function checkEvolutionConnection(): Promise<{ connected: boolean; state: string; details?: any }> {
   try {
-    const { baseUrl, apiKey, instance } = getEvolutionConfig();
+    const { baseUrl, apiKey, instance } = await getEvolutionConfig();
     const endpoint = `${baseUrl}/instance/connectionState/${instance}`;
     
     const response = await axios.get(endpoint, {
@@ -124,7 +122,7 @@ export async function checkEvolutionConnection(): Promise<{ connected: boolean; 
 
 export async function fetchWhatsAppContacts(): Promise<any[]> {
   try {
-    const { baseUrl, apiKey, instance } = getEvolutionConfig();
+    const { baseUrl, apiKey, instance } = await getEvolutionConfig();
     const endpoint = `${baseUrl}/chat/findContacts/${instance}`;
     const response = await axios.post(endpoint, {}, {
       headers: { 'apikey': apiKey, 'Content-Type': 'application/json' },
@@ -139,7 +137,7 @@ export async function fetchWhatsAppContacts(): Promise<any[]> {
 
 export async function fetchWhatsAppChats(): Promise<any[]> {
   try {
-    const { baseUrl, apiKey, instance } = getEvolutionConfig();
+    const { baseUrl, apiKey, instance } = await getEvolutionConfig();
     const endpoint = `${baseUrl}/chat/findChats/${instance}`;
     const response = await axios.post(endpoint, {}, {
       headers: { 'apikey': apiKey, 'Content-Type': 'application/json' },
