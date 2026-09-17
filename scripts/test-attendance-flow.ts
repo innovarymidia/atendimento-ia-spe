@@ -250,10 +250,58 @@ async function runScenarioTests() {
   passedCount++;
 
   // -------------------------------------------------------------
+  // CENÁRIO 13: Trava Estrutural caso_minimamente_compreendido
+  // -------------------------------------------------------------
+  console.log('▶ [Cenário 13] Trava Estrutural: Caso Vago ("Coisas de filhote") não permite Avaliação...');
+  const phone13 = '5565981010013';
+  const c13 = await findOrCreateContact(phone13, 'Lead Vago');
+  const state13 = parseConversationState(null, c13);
+  
+  // Tutor envia relato vago
+  const res13 = await processConversationWithGemini(c13, [], 'SRD, filhote, coisas de filhote', state13);
+  if (['APRESENTACAO_DA_AVALIACAO', 'APRESENTACAO_DE_VALORES_MATERIAL'].includes(res13.newStage)) {
+    throw new Error(`FALHA: Trava falhou e permitiu avançar para ${res13.newStage} com relato vago!`);
+  }
+  console.log(`  Etapa retida com segurança em: ${res13.newStage}`);
+  console.log('  ✓ Sucesso: Trava caso_minimamente_compreendido reteve avanço prematuro de avaliação.\n');
+  passedCount++;
+
+  // -------------------------------------------------------------
+  // CENÁRIO 14: Trava Estrutural pdf_permitido (Bloqueio sem Confirmação)
+  // -------------------------------------------------------------
+  console.log('▶ [Cenário 14] Trava Estrutural: PDF Bloqueado sem Confirmação Expressa do Tutor...');
+  const phone14 = '5565981010014';
+  const c14 = await findOrCreateContact(phone14, 'Lead Sem Confirmacao PDF');
+  const state14 = parseConversationState(null, c14);
+  state14.facts.city = 'Cuiabá';
+  
+  // Tutor apenas informa a cidade sem pedir ou autorizar PDF
+  const res14 = await processConversationWithGemini(c14, [
+    { id: 1, contactId: c14.id, sender: 'assistant', content: 'Posso te enviar nosso material informativo com os valores?', mediaUrl: null, createdAt: '' }
+  ], 'Cuiabá', state14);
+
+  if (res14.shouldSendPdf) {
+    throw new Error('FALHA: Trava pdf_permitido permitiu envio de PDF sem o tutor ter dito sim/pode/manda!');
+  }
+  console.log(`  shouldSendPdf com resposta apenas "Cuiabá": ${res14.shouldSendPdf}`);
+  
+  // Agora tutor confirma expressamente "pode mandar"
+  const res14Confirm = await processConversationWithGemini(c14, [
+    { id: 1, contactId: c14.id, sender: 'assistant', content: 'Posso te enviar nosso material informativo com os valores?', mediaUrl: null, createdAt: '' }
+  ], 'Pode mandar sim por favor', state14);
+
+  if (!res14Confirm.shouldSendPdf) {
+    throw new Error('FALHA: Deveria permitir envio de PDF após confirmação expressa "Pode mandar sim por favor"');
+  }
+  console.log(`  shouldSendPdf após "Pode mandar sim por favor": ${res14Confirm.shouldSendPdf}`);
+  console.log('  ✓ Sucesso: Trava pdf_permitido protegeu o fluxo e só liberou após consentimento explícito.\n');
+  passedCount++;
+
+  // -------------------------------------------------------------
   // RESUMO FINAL
   // -------------------------------------------------------------
   console.log('================================================================');
-  console.log(`  TODOS OS ${passedCount}/12 CENÁRIOS FORAM VALIDADOS COM SUCESSO! `);
+  console.log(`  TODOS OS ${passedCount}/14 CENÁRIOS FORAM VALIDADOS COM SUCESSO! `);
   console.log('================================================================\n');
 }
 

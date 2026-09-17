@@ -1,8 +1,13 @@
 import { GoogleGenAI } from '@google/genai';
 import { Contact, Message } from './db';
 import { getAllSettings } from './settings-sync';
-import { ConversationState, AttendanceStage } from './conversation-state';
 import { logEvent } from './logger';
+import {
+  ConversationState,
+  AttendanceStage,
+  evaluateCaseUnderstanding,
+  isPdfExplicitlyAllowed
+} from './conversation-state';
 
 async function getGeminiClient(): Promise<GoogleGenAI> {
   const settings = await getAllSettings();
@@ -217,6 +222,12 @@ A IA NÃO RESPONDE NUNCA MAIS após a desativação. Se aiActive = false, perman
 
 ---
 
+## TRAVAS DO SISTEMA (pdf_permitido E avaliacao_apresentada)
+1. A Avaliação Inicial (avaliacao_apresentada) SÓ pode ser apresentada quando o caso já estiver minimamente compreendido (caso_minimamente_compreendido = true). Se o relato for vago ("coisas de filhote", "ele é difícil", "quero adestrar"), continue entendendo o caso e NÃO avance para a avaliação nem para o PDF.
+2. O envio de PDF (shouldSendPdf = true) SÓ pode ser executado quando houver confirmação ou solicitação explícita do tutor ("sim", "pode", "manda", "quero", "valores", etc.). Se você estiver apenas oferecendo ("Posso te enviar?"), shouldSendPdf DEVE ser false.
+
+---
+
 ## 34 e 35. PRINCÍPIO DEFINITIVO
 A IA deve pensar: "O que essa pessoa precisa saber ou responder neste momento para que a conversa avance de forma natural?"
 Não invente. Não presuma. Não repita. Não apresse. Não venda antes de explicar. Não envie PDF antes da hora.
@@ -245,6 +256,9 @@ Retorne SEMPRE um JSON válido no formato:
 }
 `;
 
+  const isCaseUnderstood = evaluateCaseUnderstanding(currentState, incomingMessage, history);
+  const isPdfAllowed = isPdfExplicitlyAllowed(incomingMessage, history, currentState);
+
   const userPrompt = `
 DADOS DO LEAD JÁ CONHECIDOS:
 - Nome do Tutor: ${currentState.nome || contact.name || 'Não informado'}
@@ -252,6 +266,8 @@ DADOS DO LEAD JÁ CONHECIDOS:
 - Pet: Nome: ${currentState.facts.dogName || contact.dogName || 'Não informado'} | Raça: ${currentState.facts.dogBreed || contact.dogBreed || 'Não informada'} | Idade: ${currentState.facts.dogAge || contact.dogAge || 'Não informada'}
 - Problema Relatado: ${currentState.facts.dogProblem || contact.behaviorSummary || 'Não relatado'}
 - Etapa Atual: ${currentState.etapa}
+- Caso Minimamente Compreendido?: ${isCaseUnderstood ? 'Sim' : 'Não (ainda vago, precisa entender comportamentos específicos)'}
+- Confirmação Explícita de Envio de PDF pelo Tutor?: ${isPdfAllowed ? 'Sim (tutor pediu ou autorizou explicitamente)' : 'Não (ainda não autorizou envio)'}
 - PDF já enviado antes?: ${currentState.material_enviado || contact.pdfSent ? 'Sim' : 'Não'}
 
 HISTÓRICO RECENTE DA CONVERSA:
@@ -260,7 +276,7 @@ ${formattedHistory || '(Primeiro contato)'}
 NOVA(S) MENSAGEM(NS) DO TUTOR:
 "${incomingMessage}"
 
-Analise a mensagem respeitando rigorosamente as 52 regras do prompt e devolva o JSON estruturado:
+Analise a mensagem respeitando rigorosamente as travas e regras do prompt e devolva o JSON estruturado:
 `;
 
   const candidateModels = [
@@ -301,14 +317,23 @@ Analise a mensagem respeitando rigorosamente as 52 regras do prompt e devolva o 
 
     const parsed = JSON.parse(response.text);
 
+    // Trava estrutural 1: avaliacao_apresentada só permitida se caso_minimamente_compreendido = true
+    let effectiveStage = (parsed.newStage as AttendanceStage) || currentState.etapa || 'IDENTIFICACAO_DA_NECESSIDADE';
+    if (['APRESENTACAO_DA_AVALIACAO', 'APRESENTACAO_DE_VALORES_MATERIAL'].includes(effectiveStage) && !isCaseUnderstood) {
+      effectiveStage = 'COLETA_DE_INFORMACOES';
+    }
+
+    // Trava estrutural 2: pdf_permitido (shouldSendPdf só pode ser true se o tutor autorizou explicitamente)
+    const finalShouldSendPdf = Boolean(parsed.shouldSendPdf) && isPdfAllowed;
+
     return {
       replyText: sanitizeOutputText(parsed.replyText || ''),
       identifiedCity: parsed.identifiedCity || null,
       rawCityName: parsed.rawCityName || null,
       modality: parsed.modality || null,
-      newStage: (parsed.newStage as AttendanceStage) || currentState.etapa || 'IDENTIFICACAO_DA_NECESSIDADE',
+      newStage: effectiveStage,
       extractedFacts: parsed.extractedFacts || {},
-      shouldSendPdf: Boolean(parsed.shouldSendPdf),
+      shouldSendPdf: finalShouldSendPdf,
       pdfCityTarget: parsed.pdfCityTarget || (parsed.identifiedCity || null),
       isStudentOrExcluded: Boolean(parsed.isStudentOrExcluded),
       wantsHuman: Boolean(parsed.wantsHuman),

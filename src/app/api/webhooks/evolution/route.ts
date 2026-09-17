@@ -17,6 +17,8 @@ import { validateAiResponse } from '@/lib/debugger';
 import {
   parseConversationState,
   serializeConversationState,
+  evaluateCaseUnderstanding,
+  isPdfExplicitlyAllowed,
   ConversationState
 } from '@/lib/conversation-state';
 import { logEvent } from '@/lib/logger';
@@ -137,13 +139,16 @@ export async function processContactBuffer(contactId: number): Promise<{ process
       return { processed: true, reason: 'student_or_human_handoff' };
     }
 
-    // 8. Envio de Material / PDF se solicitado e aplicável (via Link das configurações)
+    // 8. Envio de Material / PDF com Travas Estruturais no Código
     let pdfSentSuccess = false;
     let pdfUrlUsed: string | undefined;
 
+    const isCaseUnderstood = evaluateCaseUnderstanding(currentState, combinedIncomingText, history);
+    const isPdfAllowed = isPdfExplicitlyAllowed(combinedIncomingText, history, currentState);
     const cityKey = decision.pdfCityTarget || decision.identifiedCity || currentState.facts.city;
 
-    if (decision.shouldSendPdf && cityKey) {
+    // TRAVA 1: Envio do PDF só ocorre se shouldSendPdf for true E o tutor autorizou expressamente (pdf_permitido)
+    if (decision.shouldSendPdf && isPdfAllowed && cityKey) {
       const cuiabaPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
       const vgPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
       const onlinePdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
@@ -234,7 +239,14 @@ export async function processContactBuffer(contactId: number): Promise<{ process
         }
       }
 
-      const nextStage = decision.newStage;
+      // TRAVA 2: avaliacao_apresentada só pode ser true quando caso_minimamente_compreendido = true
+      let nextStage = decision.newStage;
+      if (['APRESENTACAO_DA_AVALIACAO', 'APRESENTACAO_DE_VALORES_MATERIAL'].includes(nextStage) && !isCaseUnderstood) {
+        nextStage = 'COLETA_DE_INFORMACOES';
+      }
+
+      const isEvaluationPresented = ['APRESENTACAO_DA_AVALIACAO', 'APRESENTACAO_DE_VALORES_MATERIAL', 'INTERESSE_EM_AGENDAR'].includes(nextStage) && isCaseUnderstood;
+
       const nextState: ConversationState = {
         ...currentState,
         nome: updatedUserName,
@@ -249,6 +261,9 @@ export async function processContactBuffer(contactId: number): Promise<{ process
           dogProblem: updatedDogProblem,
           city: updatedCity
         },
+        caso_minimamente_compreendido: isCaseUnderstood,
+        avaliacao_apresentada: isEvaluationPresented,
+        pdf_permitido: isPdfAllowed,
         material_enviado: pdfSentSuccess || currentState.material_enviado,
         lastUpdated: new Date().toISOString()
       };
