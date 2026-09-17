@@ -1,7 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import { Contact, Message } from './db';
-
 import { getAllSettings } from './settings-sync';
+import { ConversationState, AttendanceStage } from './conversation-state';
+import { logEvent } from './logger';
 
 async function getGeminiClient(): Promise<GoogleGenAI> {
   const settings = await getAllSettings();
@@ -9,10 +10,8 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
   return new GoogleGenAI({ apiKey });
 }
 
-
-
 /**
- * Sanitiza o texto rigorosamente para cumprir as regras de formatação:
+ * Sanitiza o texto rigorosamente para cumprir as regras do SPE:
  * - Nunca utilizar o caractere travessão longo (—)
  * - Nunca utilizar travessão médio (–)
  * - Nunca utilizar o caractere e comercial (&)
@@ -24,166 +23,124 @@ export function sanitizeOutputText(text: string): string {
     .replace(/—/g, ' - ')
     .replace(/–/g, ' - ')
     .replace(/&/g, ' e ')
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t]+/g, ' ')
     .trim();
 }
 
-export interface GeminiResponseDecision {
+export interface GeminiProcessedResult {
   replyText: string;
   identifiedCity: 'cuiaba' | 'varzea_grande' | 'outra' | null;
   rawCityName: string | null;
   modality: 'presencial_joao' | 'online_nicolle' | null;
-  step: string;
-  dogInfo: {
-    name?: string;
-    breed?: string;
-    age?: string;
-    behaviorSummary?: string;
+  newStage: AttendanceStage;
+  extractedFacts: {
+    dogName?: string;
+    dogBreed?: string;
+    dogAge?: string;
+    dogProblem?: string;
+    city?: string;
+    userName?: string;
   };
-  shouldPresentAssessment: boolean;
-  assessmentText?: string;
   shouldSendPdf: boolean;
   pdfCityTarget?: 'cuiaba' | 'varzea_grande' | 'outra';
-  finalTransferMessage?: string;
+  isStudentOrExcluded: boolean;
+  wantsHuman: boolean;
+  directQuestionAnswered: boolean;
 }
 
 export async function processConversationWithGemini(
   contact: Contact,
   history: Message[],
-  incomingMessage: string
-): Promise<GeminiResponseDecision> {
+  incomingMessage: string,
+  currentState: ConversationState
+): Promise<GeminiProcessedResult> {
   const formattedHistory = history.map(m => {
     const role = m.sender === 'user' ? 'Tutor' : m.sender === 'assistant' ? 'IA (Você)' : 'Humano';
     return `${role}: ${m.content}`;
   }).join('\n');
 
   const systemInstruction = `
-Você é a atendente virtual da empresa Seu Pet Equilibrado, especializada em adestramento canino e consultoria comportamental.
-Seu objetivo é realizar o primeiro atendimento de novos leads, compreender o que o tutor está buscando, tirar dúvidas iniciais, apresentar a Avaliação Inicial e, quando houver interesse, enviar o material correto de acordo com a cidade do tutor.
-Depois do envio do material, o atendimento deve ser obrigatoriamente transferido para um membro da equipe humana.
-A IA nunca deve substituir o atendimento humano.
+Você é a atendente virtual da empresa "Seu Pet Equilibrado" (SPE), especializada em adestramento canino e consultoria comportamental em Cuiabá e Várzea Grande (presencial) e para todo o Brasil (online).
 
-## FLUXO REAL DE ATENDIMENTO
+QUEM É VOCÊ:
+- Você é a assistente de atendimento virtual da equipe do Seu Pet Equilibrado.
+- Você NÃO é a adestradora pessoal. NUNCA diga "eu vou treinar", "eu vou até sua casa", "eu sou o adestrador".
+- Os treinos presenciais em Cuiabá e Várzea Grande são realizados pelo adestrador João Eduardo.
+- Os treinos online para outras cidades são realizados pela adestradora Nicolle.
 
-A IA não deve tratar o atendimento como um funil rígido de perguntas. Ela deve conversar naturalmente com o tutor, entender o caso, tirar as dúvidas e somente então conduzir para a apresentação da avaliação inicial e do material informativo.
+PÚBLICO EXCLUSIVO:
+- Você atende EXCLUSIVAMENTE NOVOS LEADS.
+- Se o contato disser que já é aluno, já fez aula, ou que o cãozinho já treinou com a SPE, sinalize "isStudentOrExcluded: true". A IA não atende alunos.
+- Se o contato pedir para falar com uma pessoa/atendente humano, sinalize "wantsHuman: true".
 
-O fluxo é obrigatório:
-ENTENDER O CASO
-↓
-TIRAR AS DÚVIDAS
-↓
-IDENTIFICAR A CIDADE
-↓
-DEFINIR A MODALIDADE
-↓
-APRESENTAR A AVALIAÇÃO INICIAL
-↓
-APRESENTAR O PDF EM MENSAGEM SEPARADA
-↓
-ENVIAR O PDF CORRETO
-↓
-ENCERRAR A IA
-↓
-HUMANO ASSUME O ATENDIMENTO
+REGRAS FUNDAMENTAIS DO ATENDIMENTO:
+1. NUNCA envie duas mensagens de texto consecutivas. Sua resposta deve ser SEMPRE UMA ÚNICA MENSAGEM CONSOLIDADA E COMPLETA no campo "replyText".
+2. RESPONDA SEMPRE A PERGUNTA DIRETA DO TUTOR ANTES DE AVANÇAR NO FLUXO. Se ele perguntou "como funciona?", "qual o valor?", "onde fica?", responda isso prioritariamente!
+3. NUNCA repita perguntas sobre informações já conhecidas (nome do cão, idade, raça, cidade). Se o tutor já informou, acolha e use a informação.
+4. NUNCA use mensagens genéricas em loop. Se o tutor disse o nome dele ou o problema, converse sobre o que ele acabou de relatar.
+5. PREÇOS E AVALIAÇÃO:
+   - A Avaliação Inicial é o primeiro passo obrigatório para entender a rotina, ambiente e causas do comportamento.
+   - Valores da Avaliação: Cuiabá = R$ 150 | Várzea Grande = R$ 180 | Online = R$ 120.
+   - NUNCA invente preços de pacotes ou planos de aula fechados. Os planos são orçados de forma personalizada durante ou após a avaliação.
+   - NUNCA prometa cura milagrosa, garantia de 100% ou prazos fixos como "em 3 dias ele para".
+6. ENVIO DE MATERIAL/PDF:
+   - Só marque "shouldSendPdf: true" se a cidade já for conhecida (Cuiabá, Várzea Grande ou Outra) E (o tutor tiver pedido valores/material OU a conversa tiver chegado no momento de apresentar a avaliação e valores).
+   - "pdfCityTarget" deve ser estritamente "cuiaba", "varzea_grande" ou "outra".
+   - NUNCA envie PDF se a cidade não for conhecida. Pergunte a cidade primeiro!
+7. REGRAS DE TEXTO OBRIGATÓRIAS:
+   - NUNCA use travessão longo (—) nem médio (–). Use hífen comum (-) se necessário.
+   - NUNCA use o caractere "&". Escreva sempre "e" por extenso.
 
-### ETAPA 1. CONVERSA E ENTENDIMENTO DO CASO
-No início do atendimento, o objetivo é compreender o que o tutor está buscando.
-A IA deve:
-1. Acolher o tutor de forma natural e empática.
-2. Entender o comportamento relatado.
-3. Identificar os principais objetivos com o adestramento.
-4. Fazer perguntas complementares somente quando forem necessárias.
-5. Nunca perguntar novamente algo que o tutor já informou.
-6. Explicar brevemente possíveis fatores relacionados ao comportamento, sem diagnosticar. Use termos como "pode estar relacionado a", "pelo que você descreveu", "precisamos avaliar".
-7. Explicar de forma geral como o adestramento pode trabalhar aquela situação.
-8. Tirar as dúvidas apresentadas pelo tutor.
-9. Não passar protocolos completos ou treinos detalhados pelo WhatsApp.
-10. Não pressionar o tutor para agendar enquanto ele ainda estiver esclarecendo dúvidas.
-A conversa deve parecer um atendimento humano, e não um questionário.
+FLUXO DAS ETAPAS (newStage):
+- NOVO_LEAD / SAUDACAO: Acolhimento caloroso e identificação inicial.
+- IDENTIFICACAO_DA_NECESSIDADE: Entender queixas comportamentais do cão.
+- COLETA_DE_INFORMACOES: Saber detalhes do cãozinho (idade, raça) se ainda faltarem.
+- IDENTIFICACAO_DA_CIDADE: Saber em qual cidade o tutor reside para definir atendimento presencial ou online.
+- EXPLICACAO_DO_ATENDIMENTO: Explicar como o adestramento comportamental atua no caso dele.
+- APRESENTACAO_DA_AVALIACAO: Apresentar a Avaliação Inicial e sua importância.
+- APRESENTACAO_DE_VALORES_MATERIAL: Apresentar os valores da avaliação e disponibilizar o material PDF.
+- INTERESSE_EM_AGENDAR / AGENDAMENTO: Encaminhamento para a equipe agendar a visita/sessão.
+- HUMANO: Quando o lead for aluno, pedir atendente ou requerer intervenção humana.
 
-### ETAPA 2. IDENTIFICAÇÃO DA CIDADE
-Antes de apresentar a modalidade de atendimento e enviar o material, a IA precisa saber em qual cidade o tutor mora.
-Se a cidade já tiver sido informada na conversa, nunca perguntar novamente.
-Se ainda não tiver sido informada, perguntar naturalmente no momento oportuno:
-"Para eu te explicar certinho como funciona o nosso atendimento, me fala em qual cidade vocês moram?"
-A cidade determina obrigatoriamente o atendimento e o PDF que será enviado.
-
-### ETAPA 3. DEFINIÇÃO DA MODALIDADE
-- Cuiabá: Atendimento presencial com o adestrador João Eduardo. Utilizar exclusivamente o material de Cuiabá.
-- Várzea Grande: Atendimento presencial com o adestrador João Eduardo. Utilizar exclusivamente o material de Várzea Grande.
-- Outras cidades: Atendimento online com a adestradora Nicolle. Utilizar exclusivamente o material Online.
-Nunca inventar, substituir ou enviar um PDF diferente do correspondente à cidade e modalidade.
-
-### ETAPA 4. APRESENTAÇÃO DA AVALIAÇÃO INICIAL
-Depois de compreender o caso, tirar as dúvidas principais e identificar a cidade, a IA deve apresentar a Avaliação Inicial em uma mensagem própria e separada (campo assessmentText).
-A mensagem deve explicar brevemente o objetivo da avaliação e por que ela é o primeiro passo para compreender melhor o comportamento, a rotina, o ambiente e as necessidades daquele cão.
-A apresentação deve ser personalizada de acordo com o caso relatado pelo tutor.
-Não misturar a apresentação da avaliação com a mensagem do PDF.
-
-### ETAPA 5. APRESENTAÇÃO DO PDF
-Logo após apresentar a Avaliação Inicial, enviar uma segunda mensagem separada (campo replyText) informando que será disponibilizado o material com todas as informações do atendimento e os valores.
-Exemplo:
-"Vou te enviar também nosso material com todas as informações sobre o atendimento e os valores, para você conseguir entender tudo com calma."
-Se o tutor já tiver pedido o PDF ou demonstrado interesse em recebê-lo ("quero os valores", "manda o pdf", "quanto custa?"), não perguntar novamente se ele deseja o material. Apenas informar que ele será enviado e marcar shouldSendPdf: true.
-
-### ETAPA 6. ENVIO DO PDF
-Após a confirmação de interesse do tutor, ou quando o tutor solicitar o material, enviar o PDF correspondente à cidade:
-- Cuiabá -> pdfCityTarget: "cuiaba"
-- Várzea Grande -> pdfCityTarget: "varzea_grande"
-- Outras cidades -> pdfCityTarget: "outra"
-Marcar shouldSendPdf: true.
-
-### ETAPA 7. ENCERRAMENTO DA IA
-Depois do envio do PDF, a IA deve enviar uma mensagem final curta, informando que a equipe responsável dará continuidade ao atendimento:
-"Prontinho! 😊 Já te enviei o material com todas as informações. A partir daqui, nossa equipe dará continuidade ao atendimento por aqui e poderá te passar os próximos passos."
-Depois dessa mensagem, o sistema define status = aguardando_humano e aiActive = false. A IA para obrigatoriamente de responder.
-A partir desse momento, qualquer nova mensagem enviada pelo tutor fica sob responsabilidade humana. A IA nunca mais intervém.
-
-## REGRAS RÍGIDAS DE FORMATAÇÃO:
-- NUNCA utilize o caractere travessão longo (—).
-- NUNCA utilize travessão médio (–).
-- NUNCA utilize o caractere e comercial (&). Escreva "e" por extenso.
-- NUNCA dê diagnósticos fechados nem prometa curas ou garantias absolutas.
-
-Sua resposta DEVE ser um objeto JSON válido no seguinte formato:
+Retorne SEMPRE um JSON válido no formato:
 {
-  "replyText": "mensagem da conversa regular OU mensagem separada da Etapa 5 de apresentação do PDF",
+  "replyText": "Uma única mensagem completa, empática e acolhedora em português",
   "identifiedCity": "cuiaba" | "varzea_grande" | "outra" | null,
-  "rawCityName": "nome da cidade mencionada ou null",
+  "rawCityName": "string ou null",
   "modality": "presencial_joao" | "online_nicolle" | null,
-  "step": "entendendo_caso" | "cidade_identificada" | "modalidade_definida" | "apresentou_avaliacao" | "apresentou_pdf" | "pdf_enviado",
-  "dogInfo": {
-    "name": "nome se citado ou null",
-    "breed": "raça se citada ou null",
-    "age": "idade se citada ou null",
-    "behaviorSummary": "resumo breve do comportamento relatado"
+  "newStage": "SAUDACAO" | "IDENTIFICACAO_DA_NECESSIDADE" | "COLETA_DE_INFORMACOES" | "IDENTIFICACAO_DA_CIDADE" | "EXPLICACAO_DO_ATENDIMENTO" | "APRESENTACAO_DA_AVALIACAO" | "APRESENTACAO_DE_VALORES_MATERIAL" | "INTERESSE_EM_AGENDAR" | "HUMANO",
+  "extractedFacts": {
+    "userName": "nome do tutor se informado ou null",
+    "dogName": "nome do cão se informado ou null",
+    "dogBreed": "raça se informada ou null",
+    "dogAge": "idade se informada ou null",
+    "dogProblem": "problema ou comportamento resumido se informado ou null",
+    "city": "cidade se informada ou null"
   },
-  "shouldPresentAssessment": boolean,
-  "assessmentText": "texto exclusivo e separado da Etapa 4 de Apresentação da Avaliação Inicial (ou null/omitido se ainda estiver entendendo o caso)",
   "shouldSendPdf": boolean,
   "pdfCityTarget": "cuiaba" | "varzea_grande" | "outra" | null,
-  "finalTransferMessage": "Prontinho! 😊 Já te enviei o material com todas as informações. A partir daqui, nossa equipe dará continuidade ao atendimento por aqui e poderá te passar os próximos passos."
+  "isStudentOrExcluded": boolean,
+  "wantsHuman": boolean,
+  "directQuestionAnswered": boolean
 }
 `;
 
   const userPrompt = `
-DADOS ATUAIS DO CONTATO:
-- Nome: ${contact.name || 'Desconhecido'}
-- Telefone: ${contact.phone}
-- Cidade já conhecida: ${contact.city || 'Não informada ainda'}
-- Modalidade já definida: ${contact.modality || 'Não definida'}
-- Pet: ${contact.dogName || ''} (${contact.dogBreed || ''}, ${contact.dogAge || ''})
-- Comportamento anotado: ${contact.behaviorSummary || 'Não registrado'}
-- Etapa atual: ${contact.step}
-- PDF já enviado anteriormente?: ${contact.pdfSent ? 'Sim' : 'Não'}
+DADOS DO LEAD JÁ CONHECIDOS:
+- Nome do Tutor: ${currentState.nome || contact.name || 'Não informado'}
+- Cidade Conhecida: ${currentState.facts.city || contact.city || 'Não informada'}
+- Pet: Nome: ${currentState.facts.dogName || contact.dogName || 'Não informado'} | Raça: ${currentState.facts.dogBreed || contact.dogBreed || 'Não informada'} | Idade: ${currentState.facts.dogAge || contact.dogAge || 'Não informada'}
+- Problema Relatado: ${currentState.facts.dogProblem || contact.behaviorSummary || 'Não relatado'}
+- Etapa Atual: ${currentState.etapa}
+- PDF já enviado antes?: ${currentState.material_enviado || contact.pdfSent ? 'Sim' : 'Não'}
 
-HISTÓRICO DA CONVERSA:
-${formattedHistory || '(Início do atendimento - primeira mensagem)'}
+HISTÓRICO RECENTE:
+${formattedHistory || '(Primeiro contato)'}
 
-NOVA MENSAGEM DO TUTOR:
+MENSAGEM(NS) RECEBIDA(S) DO TUTOR AGORA:
 "${incomingMessage}"
 
-Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSON estruturado.
+Analise o contexto e gere o JSON de resposta única:
 `;
 
   const candidateModels = [
@@ -213,7 +170,7 @@ Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSO
           break;
         }
       } catch (err: any) {
-        console.warn(`[Gemini] Falha com modelo ${modelName}:`, err?.message || err);
+        console.warn(`[Gemini] Tentativa com modelo ${modelName} falhou:`, err?.message || err);
         lastError = err;
       }
     }
@@ -222,39 +179,139 @@ Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSO
       throw lastError || new Error('Nenhum modelo Gemini respondeu');
     }
 
-    const responseText = response.text || '{}';
-    const parsed = JSON.parse(responseText);
-
-    // Sanitizar textos retornados
-    const replyText = sanitizeOutputText(parsed.replyText || '');
-    const assessmentText = parsed.assessmentText ? sanitizeOutputText(parsed.assessmentText) : undefined;
-    const finalTransferMessage = parsed.finalTransferMessage ? sanitizeOutputText(parsed.finalTransferMessage) : undefined;
+    const parsed = JSON.parse(response.text);
 
     return {
-      replyText: replyText,
+      replyText: sanitizeOutputText(parsed.replyText || ''),
       identifiedCity: parsed.identifiedCity || null,
       rawCityName: parsed.rawCityName || null,
       modality: parsed.modality || null,
-      step: parsed.step || contact.step || 'entendendo_caso',
-      dogInfo: parsed.dogInfo || {},
-      shouldPresentAssessment: Boolean(parsed.shouldPresentAssessment),
-      assessmentText: assessmentText,
+      newStage: (parsed.newStage as AttendanceStage) || currentState.etapa || 'IDENTIFICACAO_DA_NECESSIDADE',
+      extractedFacts: parsed.extractedFacts || {},
       shouldSendPdf: Boolean(parsed.shouldSendPdf),
       pdfCityTarget: parsed.pdfCityTarget || (parsed.identifiedCity || null),
-      finalTransferMessage: finalTransferMessage
+      isStudentOrExcluded: Boolean(parsed.isStudentOrExcluded),
+      wantsHuman: Boolean(parsed.wantsHuman),
+      directQuestionAnswered: Boolean(parsed.directQuestionAnswered)
     };
   } catch (error: any) {
-    console.error('Erro ao processar com Gemini:', error);
-    // Fallback gracioso seguro
+    console.error('[Gemini] Erro na geração com IA. Executando fallback inteligente:', error?.message || error);
+    
+    // Fallback inteligente contextual baseado na mensagem do cliente
+    return generateSmartFallback(incomingMessage, contact, currentState);
+  }
+}
+
+/**
+ * Fallback contextual inteligente para evitar respostas genéricas repetidas
+ * mesmo em caso de indisponibilidade da API do Gemini.
+ */
+function generateSmartFallback(
+  userMsg: string,
+  contact: Contact,
+  currentState: ConversationState
+): GeminiProcessedResult {
+  const msgLower = (userMsg || '').toLowerCase();
+
+  // Verifica se é aluno ou pediu humano
+  const isStudent = /aluno|já fiz aula|já sou cliente/i.test(msgLower);
+  const wantsHuman = /humano|atendente|pessoa/i.test(msgLower);
+
+  if (isStudent || wantsHuman) {
     return {
-      replyText: sanitizeOutputText('Olá! Que bom falar com você! Me conta um pouquinho mais sobre o que você e seu cãozinho estão precisando no momento?'),
+      replyText: sanitizeOutputText('Com certeza! Vou transferir seu contato agora mesmo para um membro da nossa equipe dar continuidade ao seu atendimento por aqui. Um momento!'),
       identifiedCity: null,
       rawCityName: null,
       modality: null,
-      step: 'entendendo_caso',
-      dogInfo: {},
-      shouldPresentAssessment: false,
-      shouldSendPdf: false
+      newStage: 'HUMANO',
+      extractedFacts: {},
+      shouldSendPdf: false,
+      isStudentOrExcluded: isStudent,
+      wantsHuman: true,
+      directQuestionAnswered: true
     };
   }
+
+  // Verifica menção de nome do tutor
+  const nameMatch = userMsg.match(/me chamo\s+([A-Za-zÀ-ÿ]+)/i) || userMsg.match(/sou\s+(?:o|a)?\s*([A-Za-zÀ-ÿ]+)/i);
+  const extractedName = nameMatch ? nameMatch[1] : currentState.nome || contact.name;
+
+  // Se perguntou "como funciona"
+  if (/como funciona/i.test(msgLower)) {
+    const greeting = extractedName ? `Olá, ${extractedName}!` : 'Olá!';
+    return {
+      replyText: sanitizeOutputText(`${greeting} Nosso trabalho começa com uma Avaliação Inicial no ambiente do cãozinho, onde analisamos a rotina, o comportamento e as necessidades específicas dele para montar um plano personalizado. Me conta: qual é o comportamento que você mais gostaria de ajustar nele?`),
+      identifiedCity: null,
+      rawCityName: null,
+      modality: null,
+      newStage: 'IDENTIFICACAO_DA_NECESSIDADE',
+      extractedFacts: extractedName ? { userName: extractedName } : {},
+      shouldSendPdf: false,
+      isStudentOrExcluded: false,
+      wantsHuman: false,
+      directQuestionAnswered: true
+    };
+  }
+
+  // Se perguntou "quanto custa" / valor
+  if (/quanto custa|qual o valor|preço|tabela/i.test(msgLower)) {
+    return {
+      replyText: sanitizeOutputText('Nosso atendimento começa pela Avaliação Inicial presencial ou online. Em Cuiabá o investimento da avaliação é de R$ 150, em Várzea Grande é R$ 180, e o atendimento Online é R$ 120. Para eu te passar o material completinho com todas as informações, me conta em qual cidade vocês moram?'),
+      identifiedCity: null,
+      rawCityName: null,
+      modality: null,
+      newStage: 'IDENTIFICACAO_DA_CIDADE',
+      extractedFacts: extractedName ? { userName: extractedName } : {},
+      shouldSendPdf: false,
+      isStudentOrExcluded: false,
+      wantsHuman: false,
+      directQuestionAnswered: true
+    };
+  }
+
+  // Se o tutor acabou de se apresentar com nome e queixa
+  if (extractedName && !currentState.facts.dogProblem) {
+    return {
+      replyText: sanitizeOutputText(`Olá, ${extractedName}! Que prazer falar com você! Me conta um pouquinho mais sobre o seu cãozinho: qual o nome dele e quais comportamentos você gostaria de trabalhar ou ajustar no momento?`),
+      identifiedCity: null,
+      rawCityName: null,
+      modality: null,
+      newStage: 'IDENTIFICACAO_DA_NECESSIDADE',
+      extractedFacts: { userName: extractedName },
+      shouldSendPdf: false,
+      isStudentOrExcluded: false,
+      wantsHuman: false,
+      directQuestionAnswered: true
+    };
+  }
+
+  // Se usuário enviou apenas ponto de interrogação ou mensagem muito curta
+  if (/^\?+$/.test(msgLower.trim()) || msgLower.trim().length <= 2) {
+    return {
+      replyText: sanitizeOutputText('Estou por aqui! Você gostaria de tirar alguma dúvida ou me contar como está a rotina com seu cãozinho no momento?'),
+      identifiedCity: null,
+      rawCityName: null,
+      modality: null,
+      newStage: currentState.etapa || 'IDENTIFICACAO_DA_NECESSIDADE',
+      extractedFacts: {},
+      shouldSendPdf: false,
+      isStudentOrExcluded: false,
+      wantsHuman: false,
+      directQuestionAnswered: true
+    };
+  }
+
+  // Fallback padrão amigável
+  return {
+    replyText: sanitizeOutputText('Olá! Que bom falar com você! Como o Seu Pet Equilibrado pode ajudar você e seu cãozinho hoje? Me conta um pouquinho do que você gostaria de melhorar na convivência com ele!'),
+    identifiedCity: null,
+    rawCityName: null,
+    modality: null,
+    newStage: 'IDENTIFICACAO_DA_NECESSIDADE',
+    extractedFacts: {},
+    shouldSendPdf: false,
+    isStudentOrExcluded: false,
+    wantsHuman: false,
+    directQuestionAnswered: true
+  };
 }

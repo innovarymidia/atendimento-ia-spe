@@ -13,6 +13,8 @@ async function getEvolutionConfig() {
 }
 
 
+import { logEvent } from './logger';
+
 export async function sendWhatsAppText(toPhone: string, text: string): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
     const { baseUrl, apiKey, instance } = await getEvolutionConfig();
@@ -39,12 +41,31 @@ export async function sendWhatsAppText(toPhone: string, text: string): Promise<{
       }
     );
 
-    return { success: true, data: response.data };
+    const isSuccess = response.status >= 200 && response.status < 300 && (!response.data?.status || response.data.status !== 'ERROR');
+    
+    logEvent({
+      eventType: 'EVOLUTION_SEND',
+      contactPhone: phone,
+      details: {
+        type: 'text',
+        success: isSuccess,
+        status: response.status,
+        textLength: text.length
+      }
+    });
+
+    return { success: isSuccess, data: response.data };
   } catch (error: any) {
+    const errMsg = error?.response?.data?.message || error.message || 'Erro desconhecido ao enviar mensagem';
+    logEvent({
+      eventType: 'EVOLUTION_SEND',
+      contactPhone: toPhone,
+      details: { type: 'text', success: false, error: errMsg }
+    });
     console.error('Erro ao enviar mensagem no WhatsApp via Evolution API:', error?.response?.data || error.message);
     return {
       success: false,
-      error: error?.response?.data?.message || error.message || 'Erro desconhecido ao enviar mensagem'
+      error: errMsg
     };
   }
 }
@@ -79,12 +100,32 @@ export async function sendWhatsAppMedia(
       }
     );
 
-    return { success: true, data: response.data };
+    const isSuccess = response.status >= 200 && response.status < 300 && (!response.data?.status || response.data.status !== 'ERROR');
+
+    logEvent({
+      eventType: 'EVOLUTION_SEND',
+      contactPhone: phone,
+      details: {
+        type: 'media',
+        fileName,
+        mediaUrl,
+        success: isSuccess,
+        status: response.status
+      }
+    });
+
+    return { success: isSuccess, data: response.data };
   } catch (error: any) {
+    const errMsg = error?.response?.data?.message || error.message || 'Erro ao enviar documento';
+    logEvent({
+      eventType: 'EVOLUTION_SEND',
+      contactPhone: toPhone,
+      details: { type: 'media', fileName, success: false, error: errMsg }
+    });
     console.error('Erro ao enviar documento no WhatsApp via Evolution API:', error?.response?.data || error.message);
     return {
       success: false,
-      error: error?.response?.data?.message || error.message || 'Erro ao enviar documento'
+      error: errMsg
     };
   }
 }

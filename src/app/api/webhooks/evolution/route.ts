@@ -1,9 +1,349 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { Message, queryOne, queryAll, executeRun } from '@/lib/db';
+import { NextRequest, NextResponse, after } from 'next/server';
+import { Contact, Message, queryOne, queryAll, executeRun } from '@/lib/db';
 import { cleanPhoneNumber } from '@/lib/phone';
 import { findOrCreateContact, evaluateGuardrail } from '@/lib/guardrail';
 import { processConversationWithGemini } from '@/lib/gemini';
 import { sendWhatsAppText, sendWhatsAppMedia } from '@/lib/evolution';
+import {
+  acquireLock,
+  releaseLock,
+  getUnprocessedMessages,
+  markMessagesAsProcessed,
+  getHumanDelayMs,
+  BUFFER_WINDOW_MS,
+  cancelPendingSend
+} from '@/lib/buffer';
+import { validateAiResponse } from '@/lib/debugger';
+import {
+  parseConversationState,
+  serializeConversationState,
+  ConversationState
+} from '@/lib/conversation-state';
+import { logEvent } from '@/lib/logger';
+
+export const maxDuration = 60; // 60 segundos de tempo limite para execução de background no Vercel
+
+/**
+ * Worker do Buffer e Envio Inteligente por Contato
+ */
+export async function processContactBuffer(contactId: number): Promise<void> {
+  const silenceMs = BUFFER_WINDOW_MS; // 5 segundos de silêncio
+  let keepWaiting = true;
+
+  // 1. Loop de Debounce de Silêncio: espera até que o cliente pare de digitar por 5 segundos
+  while (keepWaiting) {
+    const contact = await queryOne<Contact>(
+      'SELECT id, lastMessageAt FROM contacts WHERE id = ?',
+      [contactId]
+    );
+
+    if (!contact || !contact.lastMessageAt) {
+      return;
+    }
+
+    const lastMsgTime = new Date(contact.lastMessageAt).getTime();
+    const elapsed = Date.now() - lastMsgTime;
+
+    if (elapsed < silenceMs) {
+      const waitTime = silenceMs - elapsed + 100;
+      await new Promise(r => setTimeout(r, waitTime));
+    } else {
+      keepWaiting = false;
+    }
+  }
+
+  // 2. Lock de Concorrência: garante que apenas um worker processe este contato
+  const locked = await acquireLock(contactId);
+  if (!locked) {
+    return;
+  }
+
+  try {
+    // 3. Recupera todas as mensagens do usuário acumuladas no buffer
+    const pendingMessages = await getUnprocessedMessages(contactId);
+    if (pendingMessages.length === 0) {
+      return;
+    }
+
+    const contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
+    if (!contact) {
+      return;
+    }
+
+    // 4. Guardrail determinístico pré-processamento
+    const guard = await evaluateGuardrail(contact);
+    if (!guard.allowed) {
+      logEvent({
+        eventType: 'GUARDRAIL_BLOCKED',
+        contactId,
+        details: { reason: guard.reason }
+      });
+      await markMessagesAsProcessed(pendingMessages.map(m => m.id));
+      return;
+    }
+
+    // 5. Consolidação de mensagens em um único bloco de texto
+    const combinedIncomingText = pendingMessages.map(m => m.content).join('\n');
+
+    logEvent({
+      eventType: 'BUFFER_FLUSHED',
+      contactId,
+      details: {
+        messagesCount: pendingMessages.length,
+        combinedTextPreview: combinedIncomingText.slice(0, 100)
+      }
+    });
+
+    // 6. Estado da Conversa e Histórico
+    const currentState = parseConversationState(contact.conversationState, contact);
+    const history = await queryAll<Message>(
+      'SELECT * FROM messages WHERE contactId = ? ORDER BY id ASC LIMIT 50',
+      [contactId]
+    );
+
+    // 7. Processamento Gemini 2-Fases (Interpretação e Resposta Única)
+    const decision = await processConversationWithGemini(
+      contact,
+      history,
+      combinedIncomingText,
+      currentState
+    );
+
+    // Se o contato for aluno/ex-aluno ou pediu humano, transfere imediatamente
+    if (decision.isStudentOrExcluded || decision.wantsHuman) {
+      const handoffText = decision.replyText ||
+        'Com certeza! Vou transferir seu atendimento agora mesmo para nossa equipe dar continuidade por aqui!';
+
+      await sendWhatsAppText(contact.phone, handoffText);
+
+      await executeRun(`
+        INSERT INTO messages (contactId, sender, content, isProcessed, createdAt)
+        VALUES (?, 'assistant', ?, 1, CURRENT_TIMESTAMP)
+      `, [contactId, handoffText]);
+
+      const updatedCategory = decision.isStudentOrExcluded ? 'aluno' : contact.category;
+      const nextState: ConversationState = {
+        ...currentState,
+        etapa: 'HUMANO',
+        lead_status: decision.isStudentOrExcluded ? 'aluno' : 'humano',
+        lastUpdated: new Date().toISOString()
+      };
+
+      await executeRun(`
+        UPDATE contacts 
+        SET category = ?,
+            status = 'aguardando_humano',
+            aiActive = 0,
+            stage = 'HUMANO',
+            conversationState = ?,
+            notes = COALESCE(notes, '') || ?,
+            updatedAt = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [
+        updatedCategory,
+        serializeConversationState(nextState),
+        decision.isStudentOrExcluded ? ' [Lead identificado como aluno/ex-aluno]' : ' [Solicitou atendimento humano]',
+        contactId
+      ]);
+
+      await markMessagesAsProcessed(pendingMessages.map(m => m.id));
+      return;
+    }
+
+    // 8. Envio de Material / PDF se solicitado e aplicável
+    let pdfSentSuccess = false;
+    let pdfFileName: string | undefined;
+    let pdfUrlUsed: string | undefined;
+
+    const cityKey = decision.pdfCityTarget || decision.identifiedCity || currentState.facts.city;
+
+    if (decision.shouldSendPdf && cityKey) {
+      const cuiabaPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
+      const vgPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
+      const onlinePdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
+
+      let pdfUrl = onlinePdfRow?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
+      let fileName = 'Apresentacao-Online-SPE.pdf';
+
+      if (cityKey === 'cuiaba' || cityKey.toLowerCase().includes('cuiab')) {
+        pdfUrl = cuiabaPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf';
+        fileName = 'Apresentacao-Cuiaba-SPE.pdf';
+      } else if (cityKey === 'varzea_grande' || cityKey.toLowerCase().includes('v') || cityKey.toLowerCase().includes('grande')) {
+        pdfUrl = vgPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf';
+        fileName = 'Apresentacao-Varzea-Grande-SPE.pdf';
+      }
+
+      // Envia documento PDF primeiro
+      const mediaRes = await sendWhatsAppMedia(
+        contact.phone,
+        pdfUrl,
+        fileName,
+        'Material Informativo - Seu Pet Equilibrado'
+      );
+
+      pdfSentSuccess = Boolean(mediaRes.success);
+      pdfFileName = fileName;
+      pdfUrlUsed = pdfUrl;
+    }
+
+    // 9. Validação pré-envio com Debugger (22 regras de integridade)
+    const validation = validateAiResponse({
+      aiResponseText: decision.replyText,
+      userMessage: combinedIncomingText,
+      conversationHistory: history,
+      contact,
+      state: currentState,
+      pdfSentSuccess
+    });
+
+    if (validation.shouldHandoffToHuman) {
+      await sendWhatsAppText(contact.phone, validation.sanitizedText);
+
+      await executeRun(`
+        INSERT INTO messages (contactId, sender, content, isProcessed, createdAt)
+        VALUES (?, 'assistant', ?, 1, CURRENT_TIMESTAMP)
+      `, [contactId, validation.sanitizedText]);
+
+      await executeRun(`
+        UPDATE contacts 
+        SET status = 'aguardando_humano',
+            aiActive = 0,
+            stage = 'HUMANO',
+            notes = COALESCE(notes, '') || ?,
+            updatedAt = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [` [Transferido para humano: ${validation.handoffReason || 'Debugger'}]`, contactId]);
+
+      await markMessagesAsProcessed(pendingMessages.map(m => m.id));
+      return;
+    }
+
+    // 10. Delay Humano Realista (2 a 4 segundos) com checagem de cancelamento
+    const delayMs = getHumanDelayMs();
+    await new Promise(r => setTimeout(r, delayMs));
+
+    // Se novas mensagens chegaram enquanto esperávamos o delay, aborta envio para incorporar na próxima rodada
+    const checkNewMsgs = await queryOne<{ count: number | string }>(
+      'SELECT COUNT(*) as count FROM messages WHERE contactId = ? AND isProcessed = 0 AND sender = ?',
+      [contactId, 'user']
+    );
+
+    if (checkNewMsgs && Number(checkNewMsgs.count) > 0) {
+      logEvent({
+        eventType: 'DELAY_CANCELLED',
+        contactId,
+        details: { reason: 'Nova mensagem recebida durante delay humano' }
+      });
+      return;
+    }
+
+    // 11. Envio de Mensagem ÚNICA Consolidada
+    const sendResult = await sendWhatsAppText(contact.phone, validation.sanitizedText);
+
+    if (sendResult.success) {
+      await executeRun(`
+        INSERT INTO messages (contactId, sender, content, isProcessed, createdAt)
+        VALUES (?, 'assistant', ?, 1, CURRENT_TIMESTAMP)
+      `, [contactId, validation.sanitizedText]);
+
+      if (pdfSentSuccess && pdfFileName) {
+        await executeRun(`
+          INSERT INTO messages (contactId, sender, content, mediaUrl, isProcessed, createdAt)
+          VALUES (?, 'assistant', ?, ?, 1, CURRENT_TIMESTAMP)
+        `, [contactId, `[Documento PDF Enviado: ${pdfFileName}]`, pdfUrlUsed]);
+      }
+
+      // Atualizar dados cadastrais extraídos
+      const updatedDogName = decision.extractedFacts.dogName || contact.dogName;
+      const updatedDogBreed = decision.extractedFacts.dogBreed || contact.dogBreed;
+      const updatedDogAge = decision.extractedFacts.dogAge || contact.dogAge;
+      const updatedDogProblem = decision.extractedFacts.dogProblem || contact.behaviorSummary;
+      const updatedUserName = decision.extractedFacts.userName || contact.name;
+
+      let updatedCity = contact.city;
+      let updatedModality = contact.modality;
+      if (decision.identifiedCity) {
+        if (decision.identifiedCity === 'cuiaba') {
+          updatedCity = 'Cuiabá';
+          updatedModality = 'Presencial - João Eduardo';
+        } else if (decision.identifiedCity === 'varzea_grande') {
+          updatedCity = 'Várzea Grande';
+          updatedModality = 'Presencial - João Eduardo';
+        } else {
+          updatedCity = decision.rawCityName || 'Outras Cidades';
+          updatedModality = 'Online - Nicolle';
+        }
+      }
+
+      const nextStage = decision.newStage;
+      const nextState: ConversationState = {
+        ...currentState,
+        nome: updatedUserName,
+        cidade: updatedCity,
+        problema: updatedDogProblem,
+        tipo_atendimento: (updatedModality?.toLowerCase().includes('presencial') ? 'presencial_joao' : updatedModality?.toLowerCase().includes('online') ? 'online_nicolle' : null),
+        etapa: nextStage,
+        facts: {
+          dogName: updatedDogName,
+          dogBreed: updatedDogBreed,
+          dogAge: updatedDogAge,
+          dogProblem: updatedDogProblem,
+          city: updatedCity
+        },
+        material_enviado: pdfSentSuccess || currentState.material_enviado,
+        lastUpdated: new Date().toISOString()
+      };
+
+      // Se enviou o PDF, transfere obrigatoriamente para a equipe humana (Etapa 7 do SPE)
+      const shouldHandoff = pdfSentSuccess;
+
+      await executeRun(`
+        UPDATE contacts 
+        SET name = COALESCE(?, name),
+            city = COALESCE(?, city),
+            modality = COALESCE(?, modality),
+            dogName = COALESCE(?, dogName),
+            dogBreed = COALESCE(?, dogBreed),
+            dogAge = COALESCE(?, dogAge),
+            behaviorSummary = COALESCE(?, behaviorSummary),
+            stage = ?,
+            step = ?,
+            conversationState = ?,
+            status = CASE WHEN ? = 1 THEN 'aguardando_humano' ELSE 'em_atendimento_ia' END,
+            aiActive = CASE WHEN ? = 1 THEN 0 ELSE aiActive END,
+            pdfSent = CASE WHEN ? = 1 THEN 1 ELSE pdfSent END,
+            pdfSentAt = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE pdfSentAt END,
+            lastInteractionAt = CURRENT_TIMESTAMP,
+            updatedAt = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [
+        updatedUserName,
+        updatedCity,
+        updatedModality,
+        updatedDogName,
+        updatedDogBreed,
+        updatedDogAge,
+        updatedDogProblem,
+        nextStage,
+        nextStage.toLowerCase(),
+        serializeConversationState(nextState),
+        shouldHandoff ? 1 : 0,
+        shouldHandoff ? 1 : 0,
+        pdfSentSuccess ? 1 : 0,
+        pdfSentSuccess ? 1 : 0,
+        contactId
+      ]);
+    }
+
+    // 12. Marca mensagens como processadas
+    await markMessagesAsProcessed(pendingMessages.map(m => m.id));
+
+  } catch (err: any) {
+    console.error(`[Webhook Buffer Process] Erro no contato ${contactId}:`, err);
+  } finally {
+    await releaseLock(contactId);
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -27,6 +367,18 @@ export async function POST(req: NextRequest) {
 
     const fromMe = Boolean(key.fromMe);
     const pushName = data.pushName || '';
+    const externalId = key.id || null;
+
+    // Idempotência: Se a mensagem já foi gravada antes com esse externalId, ignora repetições da API
+    if (externalId) {
+      const existingMsg = await queryOne<{ id: number }>(
+        'SELECT id FROM messages WHERE externalId = ?',
+        [externalId]
+      );
+      if (existingMsg) {
+        return NextResponse.json({ status: 'already_processed', messageId: externalId });
+      }
+    }
 
     // Extrair o texto da mensagem
     const messageObj = data.message || {};
@@ -46,216 +398,90 @@ export async function POST(req: NextRequest) {
     // 1. Identificar ou cadastrar o contato
     const contact = await findOrCreateContact(cleanPhone, pushName);
 
-    // Se a mensagem partiu de nós mesmos (fromMe), registrar como humano e atualizar lastInteraction
+    // Se a mensagem partiu de nós mesmos (fromMe), registrar como humano e pausar buffer da IA
     if (fromMe) {
+      cancelPendingSend(contact.id);
+
       if (messageContent) {
         await executeRun(`
-          INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'human', ?, CURRENT_TIMESTAMP)
-        `, [contact.id, messageContent]);
+          INSERT INTO messages (contactId, sender, content, externalId, isProcessed, createdAt)
+          VALUES (?, 'human', ?, ?, 1, CURRENT_TIMESTAMP)
+        `, [contact.id, messageContent, externalId]);
 
         await executeRun(`
           UPDATE contacts 
-          SET lastInteractionAt = CURRENT_TIMESTAMP 
+          SET lastInteractionAt = CURRENT_TIMESTAMP,
+              status = 'atendimento_humano',
+              aiActive = 0
           WHERE id = ?
         `, [contact.id]);
       }
       return NextResponse.json({ status: 'from_me_logged' });
     }
 
-    // Se não há texto (áudio, figurinha sem texto, etc.), registrar aviso acolhedor ou salvar
     const incomingText = messageContent.trim() || '[Mídia ou Áudio recebido]';
 
-    // Salvar mensagem do tutor no histórico
-    await executeRun(`
-      INSERT INTO messages (contactId, sender, content, createdAt)
-      VALUES (?, 'user', ?, CURRENT_TIMESTAMP)
-    `, [contact.id, incomingText]);
+    logEvent({
+      eventType: 'MESSAGE_RECEIVED',
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      details: {
+        externalId,
+        pushName,
+        textPreview: incomingText.slice(0, 80)
+      }
+    });
 
+    // 2. Salvar mensagem do usuário como pendente no buffer (isProcessed = 0)
+    await executeRun(`
+      INSERT INTO messages (contactId, sender, content, externalId, isProcessed, createdAt)
+      VALUES (?, 'user', ?, ?, 0, CURRENT_TIMESTAMP)
+    `, [contact.id, incomingText, externalId]);
+
+    const nowIso = new Date().toISOString();
     await executeRun(`
       UPDATE contacts 
-      SET lastInteractionAt = CURRENT_TIMESTAMP 
+      SET lastMessageAt = ?, lastInteractionAt = CURRENT_TIMESTAMP 
       WHERE id = ?
-    `, [contact.id]);
+    `, [nowIso, contact.id]);
 
-    // 2. CAMADA DE CONTROLE DETERMINÍSTICA (GUARDRAIL ANTES DA IA)
-    const guard = await evaluateGuardrail(contact);
-    if (!guard.allowed) {
-      console.log(`[SPE Guardrail] IA silenciada para ${contact.phone} (${contact.name}): ${guard.reason}`);
+    // 3. Guardrail inicial rápido: se contato já for aluno/bloqueado, marca como processado e sai
+    const initialGuard = await evaluateGuardrail(contact);
+    if (!initialGuard.allowed) {
+      logEvent({
+        eventType: 'GUARDRAIL_BLOCKED',
+        contactId: contact.id,
+        details: { reason: initialGuard.reason }
+      });
+
+      await executeRun(`
+        UPDATE messages SET isProcessed = 1 WHERE contactId = ? AND isProcessed = 0
+      `, [contact.id]);
+
       return NextResponse.json({
         status: 'blocked_by_guardrail',
-        reason: guard.reason
+        reason: initialGuard.reason
       });
     }
 
-    // Atualizar status para em_atendimento_ia se ainda for novo_lead
-    if (contact.status === 'novo_lead') {
-      await executeRun(`
-        UPDATE contacts 
-        SET status = 'em_atendimento_ia', updatedAt = CURRENT_TIMESTAMP 
-        WHERE id = ?
-      `, [contact.id]);
-      contact.status = 'em_atendimento_ia';
-    }
-
-    // 3. RECUPERAR HISTÓRICO DA CONVERSA
-    const history = await queryAll<Message>(`
-      SELECT * FROM messages WHERE contactId = ? ORDER BY id ASC LIMIT 50
-    `, [contact.id]);
-
-    // 4. PROCESSAR COM GEMINI (COM AS 31 REGRAS DO SPE)
-    const decision = await processConversationWithGemini(contact, history, incomingText);
-
-    // Atualizar dados coletados do lead
-    let updatedCity = contact.city;
-    let updatedModality = contact.modality;
-
-    if (decision.identifiedCity) {
-      if (decision.identifiedCity === 'cuiaba') {
-        updatedCity = 'Cuiabá';
-        updatedModality = 'Presencial - João Eduardo';
-      } else if (decision.identifiedCity === 'varzea_grande') {
-        updatedCity = 'Várzea Grande';
-        updatedModality = 'Presencial - João Eduardo';
-      } else {
-        updatedCity = decision.rawCityName || 'Outras Cidades';
-        updatedModality = 'Online - Nicolle';
-      }
-    }
-
-    const updatedDogName = decision.dogInfo.name || contact.dogName;
-    const updatedDogBreed = decision.dogInfo.breed || contact.dogBreed;
-    const updatedDogAge = decision.dogInfo.age || contact.dogAge;
-    const updatedBehavior = decision.dogInfo.behaviorSummary || contact.behaviorSummary;
-    const nextStep = decision.step || contact.step;
-
-    await executeRun(`
-      UPDATE contacts 
-      SET city = ?, 
-          modality = ?, 
-          dogName = ?, 
-          dogBreed = ?, 
-          dogAge = ?, 
-          behaviorSummary = ?, 
-          step = ?, 
-          updatedAt = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [
-      updatedCity,
-      updatedModality,
-      updatedDogName,
-      updatedDogBreed,
-      updatedDogAge,
-      updatedBehavior,
-      nextStep,
-      contact.id
-    ]);
-
-    // 5. DECISÃO DE ENVIO DO PDF E TRANSFERÊNCIA OBRIGATÓRIA PARA HUMANO
-    if (decision.shouldSendPdf) {
-      // Obter URLs dos materiais cadastrados nas configurações
-      const cuiabaPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
-      const vgPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
-      const onlinePdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
-
-      let pdfUrl = onlinePdfRow?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
-      let fileName = 'Apresentacao-Online-SPE.pdf';
-
-      const cityKey = decision.pdfCityTarget || decision.identifiedCity;
-      if (cityKey === 'cuiaba' || updatedCity?.toLowerCase().includes('cuiab')) {
-        pdfUrl = cuiabaPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf';
-        fileName = 'Apresentacao-Cuiaba-SPE.pdf';
-      } else if (cityKey === 'varzea_grande' || updatedCity?.toLowerCase().includes('v') || updatedCity?.toLowerCase().includes('grande')) {
-        pdfUrl = vgPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf';
-        fileName = 'Apresentacao-Varzea-Grande-SPE.pdf';
-      }
-
-      // Se houver mensagem de Avaliação Inicial separada, enviar antes
-      if (decision.assessmentText) {
-        await sendWhatsAppText(contact.phone, decision.assessmentText);
-        await executeRun(`
-          INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
-        `, [contact.id, decision.assessmentText]);
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-      }
-
-      // Enviar mensagem de apresentação do PDF
-      if (decision.replyText) {
-        await sendWhatsAppText(contact.phone, decision.replyText);
-        await executeRun(`
-          INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
-        `, [contact.id, decision.replyText]);
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-      }
-
-      // Enviar o PDF via Evolution API
-      const mediaResult = await sendWhatsAppMedia(
-        contact.phone,
-        pdfUrl,
-        fileName,
-        'Material Informativo - Seu Pet Equilibrado'
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-
-      // Enviar mensagem curta de encerramento da IA e transferência para equipe humana
-      const transferMsg = decision.finalTransferMessage ||
-        'Prontinho! 😊 Já te enviei o material com todas as informações. A partir daqui, nossa equipe dará continuidade ao atendimento por aqui e poderá te passar os próximos passos.';
-
-      await sendWhatsAppText(contact.phone, transferMsg);
-
-      await executeRun(`
-        INSERT INTO messages (contactId, sender, content, mediaUrl, createdAt)
-        VALUES (?, 'assistant', ?, ?, CURRENT_TIMESTAMP)
-      `, [contact.id, `[PDF Enviado: ${fileName}] - ${transferMsg}`, pdfUrl]);
-
-      // REGRA OBRIGATÓRIA: Bloqueio pós-transferência (aiActive = 0, status = aguardando_humano)
-      await executeRun(`
-        UPDATE contacts 
-        SET status = 'aguardando_humano', 
-            aiActive = 0, 
-            pdfSent = 1, 
-            pdfSentAt = CURRENT_TIMESTAMP, 
-            step = 'aguardando_humano',
-            updatedAt = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [contact.id]);
-
-      return NextResponse.json({
-        success: true,
-        action: 'pdf_sent_and_transferred_to_human',
-        mediaSent: mediaResult.success
+    // 4. Agendamento em background com after() do Next.js
+    if (typeof after === 'function') {
+      after(async () => {
+        await processContactBuffer(contact.id);
+      });
+    } else {
+      processContactBuffer(contact.id).catch(err => {
+        console.error('[Background Buffer Catch]:', err);
       });
     }
 
-    // 6. FLUXO CONVERSACIONAL REGULAR
-    // Se a IA apresentou a Avaliação Inicial (Etapa 4), enviar como mensagem própria e separada
-    if (decision.assessmentText) {
-      await sendWhatsAppText(contact.phone, decision.assessmentText);
-      await executeRun(`
-        INSERT INTO messages (contactId, sender, content, createdAt)
-        VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
-      `, [contact.id, decision.assessmentText]);
-
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-    }
-
-    // Mensagem da conversa ou Apresentação do PDF em mensagem separada (Etapa 5)
-    if (decision.replyText) {
-      await sendWhatsAppText(contact.phone, decision.replyText);
-
-      await executeRun(`
-        INSERT INTO messages (contactId, sender, content, createdAt)
-        VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
-      `, [contact.id, decision.replyText]);
-    }
-
+    // Retorno 200 OK imediato para a Evolution API não reenviar o webhook
     return NextResponse.json({
-      success: true,
-      action: 'replied_regular_flow'
+      status: 'queued',
+      contactId: contact.id,
+      messageId: externalId
     });
+
   } catch (error: any) {
     console.error('Erro no processamento do webhook Evolution:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });

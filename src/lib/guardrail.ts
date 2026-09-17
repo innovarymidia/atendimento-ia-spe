@@ -46,8 +46,8 @@ export async function findOrCreateContact(rawPhone: string, rawName?: string): P
   if (!contact) {
     const insertRes = await executeRun(`
       INSERT INTO contacts (
-        phone, name, category, status, aiActive, blocked, step, lastInteractionAt
-      ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', CURRENT_TIMESTAMP)
+        phone, name, category, status, aiActive, blocked, step, stage, lastInteractionAt
+      ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', 'NOVO_LEAD', CURRENT_TIMESTAMP)
     `, [cleaned, rawName || null]);
 
     const newId = insertRes.lastInsertRowid;

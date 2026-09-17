@@ -18,6 +18,10 @@ export type Contact = {
   dogAge: string | null;
   behaviorSummary: string | null;
   step: string;
+  stage?: string;
+  conversationState?: string | null;
+  lastMessageAt?: string | null;
+  processingLockUntil?: string | null;
   pdfSent: number;
   pdfSentAt: string | null;
   notes: string | null;
@@ -32,6 +36,8 @@ export type Message = {
   sender: 'user' | 'assistant' | 'human';
   content: string;
   mediaUrl: string | null;
+  externalId?: string | null;
+  isProcessed?: number;
   createdAt: string;
 };
 
@@ -123,6 +129,10 @@ function initSqliteSchema(db: DatabaseSync) {
       dogAge TEXT,
       behaviorSummary TEXT,
       step TEXT NOT NULL DEFAULT 'novo_lead',
+      stage TEXT NOT NULL DEFAULT 'novo_lead',
+      conversationState TEXT,
+      lastMessageAt TEXT,
+      processingLockUntil TEXT,
       pdfSent INTEGER NOT NULL DEFAULT 0,
       pdfSentAt TEXT,
       notes TEXT,
@@ -141,6 +151,8 @@ function initSqliteSchema(db: DatabaseSync) {
       sender TEXT NOT NULL,
       content TEXT NOT NULL,
       mediaUrl TEXT,
+      externalId TEXT,
+      isProcessed INTEGER NOT NULL DEFAULT 1,
       createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (contactId) REFERENCES contacts(id) ON DELETE CASCADE
     );
@@ -152,6 +164,23 @@ function initSqliteSchema(db: DatabaseSync) {
       value TEXT NOT NULL
     );
   `);
+
+  // Migrações dinâmicas seguras para SQLite (tabelas já existentes)
+  try {
+    const contactCols = (db.prepare("PRAGMA table_info(contacts)").all() as any[]).map(c => c.name);
+    if (!contactCols.includes('stage')) db.exec("ALTER TABLE contacts ADD COLUMN stage TEXT DEFAULT 'novo_lead'");
+    if (!contactCols.includes('conversationState')) db.exec("ALTER TABLE contacts ADD COLUMN conversationState TEXT");
+    if (!contactCols.includes('lastMessageAt')) db.exec("ALTER TABLE contacts ADD COLUMN lastMessageAt TEXT");
+    if (!contactCols.includes('processingLockUntil')) db.exec("ALTER TABLE contacts ADD COLUMN processingLockUntil TEXT");
+
+    const messageCols = (db.prepare("PRAGMA table_info(messages)").all() as any[]).map(c => c.name);
+    if (!messageCols.includes('externalId')) db.exec("ALTER TABLE messages ADD COLUMN externalId TEXT");
+    if (!messageCols.includes('isProcessed')) db.exec("ALTER TABLE messages ADD COLUMN isProcessed INTEGER DEFAULT 1");
+
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_externalId ON messages(externalId)");
+  } catch (migErr) {
+    console.warn('[DB SQLite Migration Warning]:', migErr);
+  }
 
   const defaultSettings = [
     { key: 'globalAiEnabled', value: 'true' },
@@ -204,6 +233,10 @@ async function initPostgresSchema(sql: any) {
       dogAge TEXT,
       behaviorSummary TEXT,
       step TEXT NOT NULL DEFAULT 'novo_lead',
+      stage TEXT NOT NULL DEFAULT 'novo_lead',
+      conversationState TEXT,
+      lastMessageAt TIMESTAMP,
+      processingLockUntil TIMESTAMP,
       pdfSent INTEGER NOT NULL DEFAULT 0,
       pdfSentAt TEXT,
       notes TEXT,
@@ -220,17 +253,30 @@ async function initPostgresSchema(sql: any) {
       sender TEXT NOT NULL,
       content TEXT NOT NULL,
       mediaUrl TEXT,
+      externalId TEXT,
+      isProcessed INTEGER NOT NULL DEFAULT 1,
       createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
     `CREATE INDEX IF NOT EXISTS idx_pg_messages_contactId ON messages(contactId)`,
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    )`
+    )`,
+    // Migrações dinâmicas para PostgreSQL existente
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'novo_lead'`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS conversationState TEXT`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lastMessageAt TIMESTAMP`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS processingLockUntil TIMESTAMP`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS externalId TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS isProcessed INTEGER DEFAULT 1`
   ];
 
   for (const stmt of ddlStatements) {
-    await sql.query(stmt);
+    try {
+      await sql.query(stmt);
+    } catch (e: any) {
+      console.warn('[Postgres Schema/Migration notice]:', e.message);
+    }
   }
 
   const defaultSettings = [
@@ -254,6 +300,38 @@ async function initPostgresSchema(sql: any) {
   globalForDb.schemaInitialized = true;
 }
 
+function normalizeRow(row: any): any {
+  if (!row || typeof row !== 'object') return row;
+  const mapped: any = { ...row };
+  const keyMap: Record<string, string> = {
+    aiactive: 'aiActive',
+    dogname: 'dogName',
+    dogBreed: 'dogBreed',
+    dogbreed: 'dogBreed',
+    dogage: 'dogAge',
+    behaviorsummary: 'behaviorSummary',
+    pdfsent: 'pdfSent',
+    pdfsentat: 'pdfSentAt',
+    lastinteractionat: 'lastInteractionAt',
+    createdat: 'createdAt',
+    updatedat: 'updatedAt',
+    contactid: 'contactId',
+    mediaurl: 'mediaUrl',
+    externalid: 'externalId',
+    isprocessed: 'isProcessed',
+    conversationstate: 'conversationState',
+    lastmessageat: 'lastMessageAt',
+    processinglockuntil: 'processingLockUntil'
+  };
+
+  for (const [lower, camel] of Object.entries(keyMap)) {
+    if (lower in mapped && !(camel in mapped)) {
+      mapped[camel] = mapped[lower];
+    }
+  }
+  return mapped;
+}
+
 /**
  * Utilitário unificado de execução de queries assíncronas
  * Converte automaticamente placeholders '?' para '$1, $2' no PostgreSQL
@@ -265,7 +343,8 @@ export async function queryAll<T = any>(sqlQuery: string, params: any[] = []): P
     let idx = 1;
     const convertedSql = sqlQuery.replace(/\?/g, () => `$${idx++}`);
     const rows = await sql.query(convertedSql, params);
-    return (Array.isArray(rows) ? rows : (rows as any)?.rows || []) as T[];
+    const rawList = (Array.isArray(rows) ? rows : (rows as any)?.rows || []);
+    return rawList.map(normalizeRow) as T[];
   } else {
     const db = getSqliteDb();
     const rows = db.prepare(sqlQuery).all(...params);
