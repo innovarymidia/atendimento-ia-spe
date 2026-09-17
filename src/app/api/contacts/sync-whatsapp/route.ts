@@ -1,11 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
-import { cleanPhoneNumber, getPhoneSearchVariants } from '@/lib/phone';
+import { queryOne, executeRun } from '@/lib/db';
+import { cleanPhoneNumber } from '@/lib/phone';
 import { fetchWhatsAppContacts, fetchWhatsAppChats } from '@/lib/evolution';
 
 export async function POST() {
   try {
-    const db = getDb();
     const [contactsList, chatsList] = await Promise.all([
       fetchWhatsAppContacts(),
       fetchWhatsAppChats()
@@ -13,16 +12,6 @@ export async function POST() {
 
     let importedCount = 0;
     let updatedCount = 0;
-
-    const findStmt = db.prepare(`SELECT id, name, category, status, aiActive FROM contacts WHERE phone = ?`);
-    const insertStmt = db.prepare(`
-      INSERT INTO contacts (
-        phone, name, category, status, aiActive, blocked, step, lastInteractionAt
-      ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', datetime('now', 'localtime'))
-    `);
-    const updateNameStmt = db.prepare(`
-      UPDATE contacts SET name = ?, updatedAt = datetime('now', 'localtime') WHERE id = ?
-    `);
 
     const processedPhones = new Set<string>();
 
@@ -45,12 +34,24 @@ export async function POST() {
 
       const pushName = chat.pushName && chat.pushName !== '.' ? chat.pushName : null;
 
-      const existing = findStmt.get(cleanPhone) as { id: number; name: string | null } | undefined;
+      const existing = await queryOne<{ id: number; name: string | null }>(
+        'SELECT id, name FROM contacts WHERE phone = ?',
+        [cleanPhone]
+      );
+
       if (!existing) {
-        insertStmt.run(cleanPhone, pushName);
+        await executeRun(`
+          INSERT INTO contacts (
+            phone, name, category, status, aiActive, blocked, step, lastInteractionAt
+          ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', CURRENT_TIMESTAMP)
+          ON CONFLICT (phone) DO NOTHING
+        `, [cleanPhone, pushName]);
         importedCount++;
       } else if (pushName && (!existing.name || existing.name === 'Desconhecido')) {
-        updateNameStmt.run(pushName, existing.id);
+        await executeRun(
+          'UPDATE contacts SET name = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+          [pushName, existing.id]
+        );
         updatedCount++;
       }
     }
@@ -68,12 +69,24 @@ export async function POST() {
 
       const name = c.pushName || c.name || null;
 
-      const existing = findStmt.get(cleanPhone) as { id: number; name: string | null } | undefined;
+      const existing = await queryOne<{ id: number; name: string | null }>(
+        'SELECT id, name FROM contacts WHERE phone = ?',
+        [cleanPhone]
+      );
+
       if (!existing) {
-        insertStmt.run(cleanPhone, name);
+        await executeRun(`
+          INSERT INTO contacts (
+            phone, name, category, status, aiActive, blocked, step, lastInteractionAt
+          ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', CURRENT_TIMESTAMP)
+          ON CONFLICT (phone) DO NOTHING
+        `, [cleanPhone, name]);
         importedCount++;
       } else if (name && (!existing.name || existing.name === 'Desconhecido')) {
-        updateNameStmt.run(name, existing.id);
+        await executeRun(
+          'UPDATE contacts SET name = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+          [name, existing.id]
+        );
         updatedCount++;
       }
     }
@@ -89,3 +102,4 @@ export async function POST() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

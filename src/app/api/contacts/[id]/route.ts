@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Contact } from '@/lib/db';
+import { Contact, queryOne, executeRun } from '@/lib/db';
 import { assumeAttendance, returnToAi } from '@/lib/guardrail';
 
 export async function GET(
@@ -13,8 +13,7 @@ export async function GET(
       return NextResponse.json({ error: 'ID inválido' }, { status: 400 });
     }
 
-    const db = getDb();
-    const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId) as Contact | undefined;
+    const contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
 
     if (!contact) {
       return NextResponse.json({ error: 'Contato não encontrado' }, { status: 404 });
@@ -38,24 +37,23 @@ export async function PATCH(
     }
 
     const body = await req.json();
-    const db = getDb();
 
     // Ação expressa: Assumir atendimento manualmente (João ou Nicolle)
     if (body.action === 'assume') {
-      assumeAttendance(contactId);
-      const updated = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId);
+      await assumeAttendance(contactId);
+      const updated = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
       return NextResponse.json({ contact: updated, message: 'Atendimento assumido pelo atendente humano com sucesso. IA desativada.' });
     }
 
     // Ação expressa: Devolver para a IA
     if (body.action === 'return_to_ai') {
-      returnToAi(contactId);
-      const updated = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId);
+      await returnToAi(contactId);
+      const updated = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
       return NextResponse.json({ contact: updated, message: 'Conversa devolvida para a IA com sucesso.' });
     }
 
     // Atualização genérica de campos
-    const existing = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId) as Contact | undefined;
+    const existing = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
     if (!existing) {
       return NextResponse.json({ error: 'Contato não encontrado' }, { status: 404 });
     }
@@ -74,7 +72,7 @@ export async function PATCH(
     const step = body.step !== undefined ? body.step : existing.step;
     const notes = body.notes !== undefined ? body.notes : existing.notes;
 
-    db.prepare(`
+    await executeRun(`
       UPDATE contacts 
       SET name = ?,
           category = ?,
@@ -89,15 +87,15 @@ export async function PATCH(
           behaviorSummary = ?,
           step = ?,
           notes = ?,
-          updatedAt = datetime('now', 'localtime')
+          updatedAt = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(
+    `, [
       name, category, status, aiActive, blocked, city, modality,
       dogName, dogBreed, dogAge, behaviorSummary, step, notes,
       contactId
-    );
+    ]);
 
-    const updated = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId);
+    const updated = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
     return NextResponse.json({ contact: updated, message: 'Contato atualizado com sucesso' });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -115,8 +113,7 @@ export async function DELETE(
       return NextResponse.json({ error: 'ID inválido' }, { status: 400 });
     }
 
-    const db = getDb();
-    db.prepare('DELETE FROM contacts WHERE id = ?').run(contactId);
+    await executeRun('DELETE FROM contacts WHERE id = ?', [contactId]);
 
     return NextResponse.json({ success: true, message: 'Contato removido com sucesso' });
   } catch (error: any) {

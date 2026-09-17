@@ -1,9 +1,9 @@
-import { getDb } from '../src/lib/db';
-import { cleanPhoneNumber, formatPhoneNumber, getPhoneSearchVariants } from '../src/lib/phone';
+import { queryOne, executeRun } from '../src/lib/db';
+import { cleanPhoneNumber, formatPhoneNumber } from '../src/lib/phone';
 import { findOrCreateContact, evaluateGuardrail, assumeAttendance, returnToAi } from '../src/lib/guardrail';
 import { sanitizeOutputText } from '../src/lib/gemini';
 
-function runTests() {
+async function runTests() {
   console.log('=== INICIANDO TESTES DO SISTEMA SEU PET EQUILIBRADO ===\n');
 
   // 1. Teste de Higienização de Telefones
@@ -37,35 +37,34 @@ function runTests() {
 
   // 3. Teste do Guardrail Determinístico (Regras 1, 2, 3, 4, 24, 25)
   console.log('\n[3/5] Testando Guardrail Determinístico (Segurança Pré-IA)...');
-  const db = getDb();
 
   // Teste com Aluno Atual
-  const aluno = findOrCreateContact('65 91111-0001', 'Aluno Teste');
-  db.prepare("UPDATE contacts SET category = 'aluno' WHERE id = ?").run(aluno.id);
-  const updatedAluno = db.prepare('SELECT * FROM contacts WHERE id = ?').get(aluno.id) as any;
-  const guardAluno = evaluateGuardrail(updatedAluno);
+  const aluno = await findOrCreateContact('65 91111-0001', 'Aluno Teste');
+  await executeRun("UPDATE contacts SET category = 'aluno' WHERE id = ?", [aluno.id]);
+  const updatedAluno = await queryOne<any>('SELECT * FROM contacts WHERE id = ?', [aluno.id]);
+  const guardAluno = await evaluateGuardrail(updatedAluno);
   console.log(`   Aluno (${updatedAluno.phone}): Liberado IA? ${guardAluno.allowed} (Motivo: ${guardAluno.reason})`);
   if (guardAluno.allowed !== false) throw new Error('FALHA GRAVE: Aluno não foi bloqueado pela proteção determinística!');
 
   // Teste com Contato Bloqueado
-  const bloqueado = findOrCreateContact('65 91111-0002', 'Contato Bloqueado');
-  db.prepare('UPDATE contacts SET blocked = 1 WHERE id = ?').run(bloqueado.id);
-  const updatedBloqueado = db.prepare('SELECT * FROM contacts WHERE id = ?').get(bloqueado.id) as any;
-  const guardBloqueado = evaluateGuardrail(updatedBloqueado);
+  const bloqueado = await findOrCreateContact('65 91111-0002', 'Contato Bloqueado');
+  await executeRun('UPDATE contacts SET blocked = 1 WHERE id = ?', [bloqueado.id]);
+  const updatedBloqueado = await queryOne<any>('SELECT * FROM contacts WHERE id = ?', [bloqueado.id]);
+  const guardBloqueado = await evaluateGuardrail(updatedBloqueado);
   console.log(`   Bloqueado (${updatedBloqueado.phone}): Liberado IA? ${guardBloqueado.allowed} (Motivo: ${guardBloqueado.reason})`);
   if (guardBloqueado.allowed !== false) throw new Error('FALHA GRAVE: Contato bloqueado não foi silenciado!');
 
   // Teste com Equipe Interna
-  const equipe = findOrCreateContact('65 91111-0003', 'João Eduardo');
-  db.prepare("UPDATE contacts SET category = 'equipe' WHERE id = ?").run(equipe.id);
-  const updatedEquipe = db.prepare('SELECT * FROM contacts WHERE id = ?').get(equipe.id) as any;
-  const guardEquipe = evaluateGuardrail(updatedEquipe);
+  const equipe = await findOrCreateContact('65 91111-0003', 'João Eduardo');
+  await executeRun("UPDATE contacts SET category = 'equipe' WHERE id = ?", [equipe.id]);
+  const updatedEquipe = await queryOne<any>('SELECT * FROM contacts WHERE id = ?', [equipe.id]);
+  const guardEquipe = await evaluateGuardrail(updatedEquipe);
   console.log(`   Equipe (${updatedEquipe.phone}): Liberado IA? ${guardEquipe.allowed} (Motivo: ${guardEquipe.reason})`);
   if (guardEquipe.allowed !== false) throw new Error('FALHA GRAVE: Equipe interna não foi silenciada!');
 
   // Teste com Novo Lead Real
-  const novoLead = findOrCreateContact('65 91111-0004', 'Novo Tutor');
-  const guardNovoLead = evaluateGuardrail(novoLead);
+  const novoLead = await findOrCreateContact('65 91111-0004', 'Novo Tutor');
+  const guardNovoLead = await evaluateGuardrail(novoLead);
   console.log(`   Novo Lead (${novoLead.phone}): Liberado IA? ${guardNovoLead.allowed} (Motivo: ${guardNovoLead.reason})`);
   if (guardNovoLead.allowed !== true) throw new Error('FALHA: Novo lead válido foi indevidamente bloqueado!');
 
@@ -73,21 +72,21 @@ function runTests() {
 
   // 4. Teste das Ações: "Assumir Atendimento" e "Devolver para IA"
   console.log('\n[4/5] Testando botão "Assumir Atendimento" e "Devolver para IA"...');
-  assumeAttendance(novoLead.id);
-  const leadAssumido = db.prepare('SELECT * FROM contacts WHERE id = ?').get(novoLead.id) as any;
+  await assumeAttendance(novoLead.id);
+  const leadAssumido = await queryOne<any>('SELECT * FROM contacts WHERE id = ?', [novoLead.id]);
   console.log(`   Após Assumir: aiActive = ${leadAssumido.aiActive}, status = "${leadAssumido.status}"`);
   if (leadAssumido.aiActive !== 0 || leadAssumido.status !== 'atendimento_humano') {
     throw new Error('Falha ao assumir atendimento humano');
   }
 
-  const guardAssumido = evaluateGuardrail(leadAssumido);
+  const guardAssumido = await evaluateGuardrail(leadAssumido);
   if (guardAssumido.allowed !== false) {
     throw new Error('FALHA GRAVE: Lead assumido por humano não silenciou a IA!');
   }
   console.log('   ✓ Assumir atendimento silencia a IA na hora!');
 
-  returnToAi(novoLead.id);
-  const leadDevolvido = db.prepare('SELECT * FROM contacts WHERE id = ?').get(novoLead.id) as any;
+  await returnToAi(novoLead.id);
+  const leadDevolvido = await queryOne<any>('SELECT * FROM contacts WHERE id = ?', [novoLead.id]);
   console.log(`   Após Devolver: aiActive = ${leadDevolvido.aiActive}, status = "${leadDevolvido.status}"`);
   if (leadDevolvido.aiActive !== 1 || leadDevolvido.status !== 'em_atendimento_ia') {
     throw new Error('Falha ao devolver para a IA');
@@ -96,10 +95,9 @@ function runTests() {
 
   // 5. Teste de Configuração dos PDFs por Cidade (Regras 18 & 21)
   console.log('\n[5/5] Testando persistência das configurações de PDFs...');
-  const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
-  const cuiaba = getSetting.get('pdfCuiabaUrl') as any;
-  const vg = getSetting.get('pdfVgUrl') as any;
-  const online = getSetting.get('pdfOnlineUrl') as any;
+  const cuiaba = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
+  const vg = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
+  const online = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
   console.log(`   PDF Cuiabá: ${cuiaba?.value}`);
   console.log(`   PDF Várzea Grande: ${vg?.value}`);
   console.log(`   PDF Online: ${online?.value}`);
@@ -111,4 +109,7 @@ function runTests() {
   console.log('\n=== TODOS OS TESTES PASSARAM COM SUCESSO! 100% OPERACIONAL ===');
 }
 
-runTests();
+runTests().catch((err) => {
+  console.error('Erro nos testes:', err);
+  process.exit(1);
+});

@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Contact } from '@/lib/db';
+import { Contact, queryAll, queryOne, executeRun } from '@/lib/db';
 import { cleanPhoneNumber } from '@/lib/phone';
 
 export async function GET(req: NextRequest) {
   try {
-    const db = getDb();
     const searchParams = req.nextUrl.searchParams;
     const search = searchParams.get('search')?.trim();
     const category = searchParams.get('category')?.trim();
@@ -36,7 +35,7 @@ export async function GET(req: NextRequest) {
 
     query += ' ORDER BY lastInteractionAt DESC, id DESC';
 
-    const contacts = db.prepare(query).all(...params) as Contact[];
+    const contacts = await queryAll<Contact>(query, params);
 
     return NextResponse.json({ contacts });
   } catch (error: any) {
@@ -46,7 +45,6 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const db = getDb();
     const body = await req.json();
 
     const rawPhone = body.phone || '';
@@ -69,10 +67,10 @@ export async function POST(req: NextRequest) {
     const aiActive = isExcludedCategory || blocked ? 0 : 1;
     const status = blocked ? 'bloqueado' : isExcludedCategory ? category : 'novo_lead';
 
-    const existing = db.prepare('SELECT id FROM contacts WHERE phone = ?').get(cleanPhone) as { id: number } | undefined;
+    const existing = await queryOne<{ id: number }>('SELECT id FROM contacts WHERE phone = ?', [cleanPhone]);
 
     if (existing) {
-      db.prepare(`
+      await executeRun(`
         UPDATE contacts 
         SET name = COALESCE(?, name),
             category = ?,
@@ -80,21 +78,27 @@ export async function POST(req: NextRequest) {
             aiActive = ?,
             blocked = ?,
             notes = COALESCE(?, notes),
-            updatedAt = datetime('now', 'localtime')
+            updatedAt = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(name, category, status, aiActive, blocked, notes, existing.id);
+      `, [name, category, status, aiActive, blocked, notes, existing.id]);
 
-      const updated = db.prepare('SELECT * FROM contacts WHERE id = ?').get(existing.id);
+      const updated = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [existing.id]);
       return NextResponse.json({ contact: updated, message: 'Contato atualizado com sucesso' });
     }
 
-    const insert = db.prepare(`
+    const insert = await executeRun(`
       INSERT INTO contacts (
         phone, name, category, status, aiActive, blocked, notes, lastInteractionAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-    `).run(cleanPhone, name, category, status, aiActive, blocked, notes);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `, [cleanPhone, name, category, status, aiActive, blocked, notes]);
 
-    const created = db.prepare('SELECT * FROM contacts WHERE id = ?').get(insert.lastInsertRowid);
+    let created: Contact | null = null;
+    if (insert.lastInsertRowid) {
+      created = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [insert.lastInsertRowid]);
+    } else {
+      created = await queryOne<Contact>('SELECT * FROM contacts WHERE phone = ?', [cleanPhone]);
+    }
+
     return NextResponse.json({ contact: created, message: 'Contato cadastrado com sucesso' }, { status: 201 });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });

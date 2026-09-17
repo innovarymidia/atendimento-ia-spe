@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { executeRun } from '@/lib/db';
 import { FORBIDDEN_CATEGORIES } from '@/lib/guardrail';
 
 export async function POST(req: NextRequest) {
@@ -18,18 +18,17 @@ export async function POST(req: NextRequest) {
     const blocked = explicitBlocked || category === 'bloqueado' ? 1 : 0;
     const status = category === 'bloqueado' ? 'bloqueado' : isExcluded ? category : 'novo_lead';
 
-    const db = getDb();
     const placeholders = ids.map(() => '?').join(',');
 
-    db.prepare(`
+    await executeRun(`
       UPDATE contacts 
       SET category = ?,
           status = ?,
           aiActive = ?,
           blocked = ?,
-          updatedAt = datetime('now', 'localtime')
+          updatedAt = CURRENT_TIMESTAMP
       WHERE id IN (${placeholders})
-    `).run(category, status, aiActive, blocked, ...ids);
+    `, [category, status, aiActive, blocked, ...ids]);
 
     return NextResponse.json({
       success: true,
@@ -41,3 +40,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

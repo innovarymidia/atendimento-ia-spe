@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Contact, Message } from '@/lib/db';
+import { Contact, Message, queryOne, queryAll, executeRun } from '@/lib/db';
 import { sendWhatsAppText, sendWhatsAppMedia } from '@/lib/evolution';
 
 export async function GET(
@@ -13,15 +13,14 @@ export async function GET(
       return NextResponse.json({ error: 'ID inválido' }, { status: 400 });
     }
 
-    const db = getDb();
-    const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId) as Contact | undefined;
+    const contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
     if (!contact) {
       return NextResponse.json({ error: 'Contato não encontrado' }, { status: 404 });
     }
 
-    const messages = db.prepare(`
+    const messages = await queryAll<Message>(`
       SELECT * FROM messages WHERE contactId = ? ORDER BY id ASC
-    `).all(contactId) as Message[];
+    `, [contactId]);
 
     return NextResponse.json({ contact, messages });
   } catch (error: any) {
@@ -43,29 +42,27 @@ export async function POST(
     const body = await req.json();
     const text = body.text?.trim();
     const mediaType = body.mediaType; // 'pdf_cuiaba', 'pdf_vg', 'pdf_online'
-    const db = getDb();
 
-    const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId) as Contact | undefined;
+    const contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
     if (!contact) {
       return NextResponse.json({ error: 'Contato não encontrado' }, { status: 404 });
     }
 
     // Se for envio manual de PDF solicitado pelo operador humano no chat
     if (mediaType) {
-      const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
       let pdfUrl = '';
       let fileName = '';
 
       if (mediaType === 'pdf_cuiaba') {
-        const row = getSetting.get('pdfCuiabaUrl') as { value: string } | undefined;
+        const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
         pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf';
         fileName = 'Apresentacao-Cuiaba-SPE.pdf';
       } else if (mediaType === 'pdf_vg') {
-        const row = getSetting.get('pdfVgUrl') as { value: string } | undefined;
+        const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
         pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf';
         fileName = 'Apresentacao-Varzea-Grande-SPE.pdf';
       } else {
-        const row = getSetting.get('pdfOnlineUrl') as { value: string } | undefined;
+        const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
         pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
         fileName = 'Apresentacao-Online-SPE.pdf';
       }
@@ -79,20 +76,23 @@ export async function POST(
 
       const msgContent = text ? `[PDF Enviado: ${fileName}] ${text}` : `[PDF Enviado: ${fileName}]`;
 
-      const insert = db.prepare(`
+      const insert = await executeRun(`
         INSERT INTO messages (contactId, sender, content, mediaUrl, createdAt)
-        VALUES (?, 'human', ?, ?, datetime('now', 'localtime'))
-      `).run(contactId, msgContent, pdfUrl);
+        VALUES (?, 'human', ?, ?, CURRENT_TIMESTAMP)
+      `, [contactId, msgContent, pdfUrl]);
 
-      db.prepare(`
+      await executeRun(`
         UPDATE contacts 
         SET pdfSent = 1, 
-            pdfSentAt = datetime('now', 'localtime'),
-            lastInteractionAt = datetime('now', 'localtime')
+            pdfSentAt = CURRENT_TIMESTAMP,
+            lastInteractionAt = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(contactId);
+      `, [contactId]);
 
-      const created = db.prepare('SELECT * FROM messages WHERE id = ?').get(insert.lastInsertRowid);
+      const created = insert.lastInsertRowid
+        ? await queryOne<Message>('SELECT * FROM messages WHERE id = ?', [insert.lastInsertRowid])
+        : null;
+
       return NextResponse.json({ message: created, mediaResult });
     }
 
@@ -104,18 +104,20 @@ export async function POST(
     const sendResult = await sendWhatsAppText(contact.phone, text);
 
     // Salvar mensagem enviada como 'human'
-    const insert = db.prepare(`
+    const insert = await executeRun(`
       INSERT INTO messages (contactId, sender, content, createdAt)
-      VALUES (?, 'human', ?, datetime('now', 'localtime'))
-    `).run(contactId, text);
+      VALUES (?, 'human', ?, CURRENT_TIMESTAMP)
+    `, [contactId, text]);
 
-    db.prepare(`
+    await executeRun(`
       UPDATE contacts 
-      SET lastInteractionAt = datetime('now', 'localtime') 
+      SET lastInteractionAt = CURRENT_TIMESTAMP 
       WHERE id = ?
-    `).run(contactId);
+    `, [contactId]);
 
-    const created = db.prepare('SELECT * FROM messages WHERE id = ?').get(insert.lastInsertRowid);
+    const created = insert.lastInsertRowid
+      ? await queryOne<Message>('SELECT * FROM messages WHERE id = ?', [insert.lastInsertRowid])
+      : null;
 
     return NextResponse.json({
       message: created,

@@ -1,32 +1,40 @@
 import { NextResponse } from 'next/server';
-import { getDb, Contact } from '@/lib/db';
+import { Contact, queryOne, queryAll } from '@/lib/db';
 import { checkEvolutionConnection } from '@/lib/evolution';
 
 export async function GET() {
   try {
-    const db = getDb();
-
     // Contagens por status e categoria
-    const totalLeads = (db.prepare("SELECT COUNT(*) as count FROM contacts WHERE category = 'novo_lead'").get() as any)?.count || 0;
-    const emAtendimentoIa = (db.prepare("SELECT COUNT(*) as count FROM contacts WHERE status = 'em_atendimento_ia' AND aiActive = 1").get() as any)?.count || 0;
-    const aguardandoHumano = (db.prepare("SELECT COUNT(*) as count FROM contacts WHERE status = 'aguardando_humano'").get() as any)?.count || 0;
-    const atendimentoHumano = (db.prepare("SELECT COUNT(*) as count FROM contacts WHERE status = 'atendimento_humano'").get() as any)?.count || 0;
-    const contatosExcluidos = (db.prepare(`
+    const totalLeadsRow = await queryOne<{ count: number | string }>("SELECT COUNT(*) as count FROM contacts WHERE category = 'novo_lead'");
+    const totalLeads = Number(totalLeadsRow?.count || 0);
+
+    const emAtendimentoIaRow = await queryOne<{ count: number | string }>("SELECT COUNT(*) as count FROM contacts WHERE status = 'em_atendimento_ia' AND aiActive = 1");
+    const emAtendimentoIa = Number(emAtendimentoIaRow?.count || 0);
+
+    const aguardandoHumanoRow = await queryOne<{ count: number | string }>("SELECT COUNT(*) as count FROM contacts WHERE status = 'aguardando_humano'");
+    const aguardandoHumano = Number(aguardandoHumanoRow?.count || 0);
+
+    const atendimentoHumanoRow = await queryOne<{ count: number | string }>("SELECT COUNT(*) as count FROM contacts WHERE status = 'atendimento_humano'");
+    const atendimentoHumano = Number(atendimentoHumanoRow?.count || 0);
+
+    const contatosExcluidosRow = await queryOne<{ count: number | string }>(`
       SELECT COUNT(*) as count FROM contacts 
       WHERE category IN ('aluno', 'ex_aluno', 'cliente', 'ex_cliente', 'equipe', 'parceiro', 'fornecedor', 'pessoal', 'nao_responder', 'bloqueado')
          OR blocked = 1
-    `).get() as any)?.count || 0;
+    `);
+    const contatosExcluidos = Number(contatosExcluidosRow?.count || 0);
 
-    const pdfsEnviados = (db.prepare("SELECT COUNT(*) as count FROM contacts WHERE pdfSent = 1").get() as any)?.count || 0;
+    const pdfsEnviadosRow = await queryOne<{ count: number | string }>("SELECT COUNT(*) as count FROM contacts WHERE pdfSent = 1");
+    const pdfsEnviados = Number(pdfsEnviadosRow?.count || 0);
 
     // Obter IA global
-    const globalSetting = db.prepare("SELECT value FROM settings WHERE key = 'globalAiEnabled'").get() as { value: string } | undefined;
+    const globalSetting = await queryOne<{ value: string }>("SELECT value FROM settings WHERE key = 'globalAiEnabled'");
     const globalAiEnabled = globalSetting?.value === 'true';
 
     // Últimos contatos
-    const recentContacts = db.prepare(`
+    const recentContacts = await queryAll<Contact>(`
       SELECT * FROM contacts ORDER BY lastInteractionAt DESC LIMIT 10
-    `).all() as Contact[];
+    `);
 
     // Status da conexão
     const evoStatus = await checkEvolutionConnection();
@@ -48,3 +56,4 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
+

@@ -1,4 +1,4 @@
-import { getDb, Contact } from './db';
+import { Contact, queryOne, queryAll, executeRun } from './db';
 import { cleanPhoneNumber, getPhoneSearchVariants } from './phone';
 
 export interface GuardrailCheckResult {
@@ -32,49 +32,45 @@ export const FORBIDDEN_STATUSES = new Set([
 ]);
 
 /**
- * Busca ou cria o contato com segurança e tolerância ao 9º dígito.
+ * Busca ou cria o contato com segurança e tolerância ao 9º dígito (Postgres & SQLite).
  */
-export function findOrCreateContact(rawPhone: string, rawName?: string): Contact {
-  const db = getDb();
+export async function findOrCreateContact(rawPhone: string, rawName?: string): Promise<Contact> {
   const cleaned = cleanPhoneNumber(rawPhone);
   const variants = getPhoneSearchVariants(cleaned);
 
-  // Buscar por qualquer variante do número (com ou sem o 9º dígito)
   const placeholders = variants.map(() => '?').join(',');
-  const findStmt = db.prepare(`
+  let contact = await queryOne<Contact>(`
     SELECT * FROM contacts WHERE phone IN (${placeholders}) LIMIT 1
-  `);
-  
-  let contact = findStmt.get(...variants) as Contact | undefined;
+  `, variants);
 
   if (!contact) {
-    // Criar como novo lead padrão
-    const insertStmt = db.prepare(`
+    const insertRes = await executeRun(`
       INSERT INTO contacts (
         phone, name, category, status, aiActive, blocked, step, lastInteractionAt
-      ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', datetime('now', 'localtime'))
-    `);
-    const info = insertStmt.run(cleaned, rawName || null);
-    
-    contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid) as Contact;
+      ) VALUES (?, ?, 'novo_lead', 'novo_lead', 1, 0, 'novo_lead', CURRENT_TIMESTAMP)
+    `, [cleaned, rawName || null]);
+
+    const newId = insertRes.lastInsertRowid;
+    if (newId) {
+      contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [newId]);
+    } else {
+      contact = await queryOne<Contact>('SELECT * FROM contacts WHERE phone = ?', [cleaned]);
+    }
   } else if (rawName && (!contact.name || contact.name === 'Desconhecido')) {
-    // Atualizar nome se recebido e ainda não preenchido
-    db.prepare(`UPDATE contacts SET name = ?, updatedAt = datetime('now', 'localtime') WHERE id = ?`).run(rawName, contact.id);
+    await executeRun(`UPDATE contacts SET name = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?`, [rawName, contact.id]);
     contact.name = rawName;
   }
 
-  return contact;
+  return contact!;
 }
 
 /**
  * Camada de controle determinística rigorosa executada ANTES da IA.
  * Nenhuma chamada de IA pode ser executada se esta função retornar allowed: false.
  */
-export function evaluateGuardrail(contact: Contact): GuardrailCheckResult {
-  const db = getDb();
-
+export async function evaluateGuardrail(contact: Contact): Promise<GuardrailCheckResult> {
   // 1. Verificar se a IA Global está ativada no sistema
-  const globalSetting = db.prepare("SELECT value FROM settings WHERE key = 'globalAiEnabled'").get() as { value: string } | undefined;
+  const globalSetting = await queryOne<{ value: string }>("SELECT value FROM settings WHERE key = 'globalAiEnabled'");
   if (globalSetting && globalSetting.value === 'false') {
     return {
       allowed: false,
@@ -130,7 +126,6 @@ export function evaluateGuardrail(contact: Contact): GuardrailCheckResult {
     };
   }
 
-  // Passou por todos os testes determinísticos
   return {
     allowed: true,
     reason: 'Contato autorizado para atendimento pela IA.',
@@ -142,27 +137,25 @@ export function evaluateGuardrail(contact: Contact): GuardrailCheckResult {
  * João ou Nicolle assumem o atendimento manualmente:
  * Desativa a IA imediatamente e define status como atendimento_humano
  */
-export function assumeAttendance(contactId: number): void {
-  const db = getDb();
-  db.prepare(`
+export async function assumeAttendance(contactId: number): Promise<void> {
+  await executeRun(`
     UPDATE contacts 
     SET aiActive = 0, 
         status = 'atendimento_humano', 
-        updatedAt = datetime('now', 'localtime')
+        updatedAt = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(contactId);
+  `, [contactId]);
 }
 
 /**
  * Operador devolve a conversa para a IA
  */
-export function returnToAi(contactId: number): void {
-  const db = getDb();
-  db.prepare(`
+export async function returnToAi(contactId: number): Promise<void> {
+  await executeRun(`
     UPDATE contacts 
     SET aiActive = 1, 
         status = 'em_atendimento_ia', 
-        updatedAt = datetime('now', 'localtime')
+        updatedAt = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(contactId);
+  `, [contactId]);
 }

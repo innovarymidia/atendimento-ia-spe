@@ -1,7 +1,5 @@
 import axios from 'axios';
 import { cleanPhoneNumber } from './phone';
-import { getDb } from './db';
-
 import { getAllSettings } from './settings-sync';
 
 async function getEvolutionConfig() {

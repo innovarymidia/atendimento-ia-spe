@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, Message } from '@/lib/db';
+import { Message, queryOne, queryAll, executeRun } from '@/lib/db';
 import { cleanPhoneNumber } from '@/lib/phone';
 import { findOrCreateContact, evaluateGuardrail } from '@/lib/guardrail';
 import { processConversationWithGemini } from '@/lib/gemini';
@@ -43,24 +43,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: 'invalid_phone' });
     }
 
-    const db = getDb();
-
     // 1. Identificar ou cadastrar o contato
-    const contact = findOrCreateContact(cleanPhone, pushName);
+    const contact = await findOrCreateContact(cleanPhone, pushName);
 
     // Se a mensagem partiu de nós mesmos (fromMe), registrar como humano e atualizar lastInteraction
     if (fromMe) {
       if (messageContent) {
-        db.prepare(`
+        await executeRun(`
           INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'human', ?, datetime('now', 'localtime'))
-        `).run(contact.id, messageContent);
+          VALUES (?, 'human', ?, CURRENT_TIMESTAMP)
+        `, [contact.id, messageContent]);
 
-        db.prepare(`
+        await executeRun(`
           UPDATE contacts 
-          SET lastInteractionAt = datetime('now', 'localtime') 
+          SET lastInteractionAt = CURRENT_TIMESTAMP 
           WHERE id = ?
-        `).run(contact.id);
+        `, [contact.id]);
       }
       return NextResponse.json({ status: 'from_me_logged' });
     }
@@ -69,19 +67,19 @@ export async function POST(req: NextRequest) {
     const incomingText = messageContent.trim() || '[Mídia ou Áudio recebido]';
 
     // Salvar mensagem do tutor no histórico
-    db.prepare(`
+    await executeRun(`
       INSERT INTO messages (contactId, sender, content, createdAt)
-      VALUES (?, 'user', ?, datetime('now', 'localtime'))
-    `).run(contact.id, incomingText);
+      VALUES (?, 'user', ?, CURRENT_TIMESTAMP)
+    `, [contact.id, incomingText]);
 
-    db.prepare(`
+    await executeRun(`
       UPDATE contacts 
-      SET lastInteractionAt = datetime('now', 'localtime') 
+      SET lastInteractionAt = CURRENT_TIMESTAMP 
       WHERE id = ?
-    `).run(contact.id);
+    `, [contact.id]);
 
     // 2. CAMADA DE CONTROLE DETERMINÍSTICA (GUARDRAIL ANTES DA IA)
-    const guard = evaluateGuardrail(contact);
+    const guard = await evaluateGuardrail(contact);
     if (!guard.allowed) {
       console.log(`[SPE Guardrail] IA silenciada para ${contact.phone} (${contact.name}): ${guard.reason}`);
       return NextResponse.json({
@@ -92,18 +90,18 @@ export async function POST(req: NextRequest) {
 
     // Atualizar status para em_atendimento_ia se ainda for novo_lead
     if (contact.status === 'novo_lead') {
-      db.prepare(`
+      await executeRun(`
         UPDATE contacts 
-        SET status = 'em_atendimento_ia', updatedAt = datetime('now', 'localtime') 
+        SET status = 'em_atendimento_ia', updatedAt = CURRENT_TIMESTAMP 
         WHERE id = ?
-      `).run(contact.id);
+      `, [contact.id]);
       contact.status = 'em_atendimento_ia';
     }
 
     // 3. RECUPERAR HISTÓRICO DA CONVERSA
-    const history = db.prepare(`
+    const history = await queryAll<Message>(`
       SELECT * FROM messages WHERE contactId = ? ORDER BY id ASC LIMIT 50
-    `).all(contact.id) as Message[];
+    `, [contact.id]);
 
     // 4. PROCESSAR COM GEMINI (COM AS 31 REGRAS DO SPE)
     const decision = await processConversationWithGemini(contact, history, incomingText);
@@ -131,7 +129,7 @@ export async function POST(req: NextRequest) {
     const updatedBehavior = decision.dogInfo.behaviorSummary || contact.behaviorSummary;
     const nextStep = decision.step || contact.step;
 
-    db.prepare(`
+    await executeRun(`
       UPDATE contacts 
       SET city = ?, 
           modality = ?, 
@@ -140,9 +138,9 @@ export async function POST(req: NextRequest) {
           dogAge = ?, 
           behaviorSummary = ?, 
           step = ?, 
-          updatedAt = datetime('now', 'localtime')
+          updatedAt = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(
+    `, [
       updatedCity,
       updatedModality,
       updatedDogName,
@@ -151,15 +149,14 @@ export async function POST(req: NextRequest) {
       updatedBehavior,
       nextStep,
       contact.id
-    );
+    ]);
 
     // 5. DECISÃO DE ENVIO DO PDF E TRANSFERÊNCIA OBRIGATÓRIA PARA HUMANO
     if (decision.shouldSendPdf) {
       // Obter URLs dos materiais cadastrados nas configurações
-      const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
-      const cuiabaPdfRow = getSetting.get('pdfCuiabaUrl') as { value: string } | undefined;
-      const vgPdfRow = getSetting.get('pdfVgUrl') as { value: string } | undefined;
-      const onlinePdfRow = getSetting.get('pdfOnlineUrl') as { value: string } | undefined;
+      const cuiabaPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
+      const vgPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
+      const onlinePdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
 
       let pdfUrl = onlinePdfRow?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
       let fileName = 'Apresentacao-Online-SPE.pdf';
@@ -176,19 +173,19 @@ export async function POST(req: NextRequest) {
       // Se houver mensagem de Avaliação Inicial separada, enviar antes
       if (decision.assessmentText) {
         await sendWhatsAppText(contact.phone, decision.assessmentText);
-        db.prepare(`
+        await executeRun(`
           INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'assistant', ?, datetime('now', 'localtime'))
-        `).run(contact.id, decision.assessmentText);
+          VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
+        `, [contact.id, decision.assessmentText]);
       }
 
       // Enviar mensagem de apresentação do PDF
       if (decision.replyText) {
         await sendWhatsAppText(contact.phone, decision.replyText);
-        db.prepare(`
+        await executeRun(`
           INSERT INTO messages (contactId, sender, content, createdAt)
-          VALUES (?, 'assistant', ?, datetime('now', 'localtime'))
-        `).run(contact.id, decision.replyText);
+          VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
+        `, [contact.id, decision.replyText]);
       }
 
       // Enviar o PDF via Evolution API
@@ -205,22 +202,22 @@ export async function POST(req: NextRequest) {
 
       await sendWhatsAppText(contact.phone, transferMsg);
 
-      db.prepare(`
+      await executeRun(`
         INSERT INTO messages (contactId, sender, content, mediaUrl, createdAt)
-        VALUES (?, 'assistant', ?, ?, datetime('now', 'localtime'))
-      `).run(contact.id, `[PDF Enviado: ${fileName}] - ${transferMsg}`, pdfUrl);
+        VALUES (?, 'assistant', ?, ?, CURRENT_TIMESTAMP)
+      `, [contact.id, `[PDF Enviado: ${fileName}] - ${transferMsg}`, pdfUrl]);
 
       // REGRA OBRIGATÓRIA: Bloqueio pós-transferência (aiActive = 0, status = aguardando_humano)
-      db.prepare(`
+      await executeRun(`
         UPDATE contacts 
         SET status = 'aguardando_humano', 
             aiActive = 0, 
             pdfSent = 1, 
-            pdfSentAt = datetime('now', 'localtime'), 
+            pdfSentAt = CURRENT_TIMESTAMP, 
             step = 'aguardando_humano',
-            updatedAt = datetime('now', 'localtime')
+            updatedAt = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).run(contact.id);
+      `, [contact.id]);
 
       return NextResponse.json({
         success: true,
@@ -233,10 +230,10 @@ export async function POST(req: NextRequest) {
     if (decision.replyText) {
       await sendWhatsAppText(contact.phone, decision.replyText);
 
-      db.prepare(`
+      await executeRun(`
         INSERT INTO messages (contactId, sender, content, createdAt)
-        VALUES (?, 'assistant', ?, datetime('now', 'localtime'))
-      `).run(contact.id, decision.replyText);
+        VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
+      `, [contact.id, decision.replyText]);
     }
 
     return NextResponse.json({
