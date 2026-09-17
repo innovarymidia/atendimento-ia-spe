@@ -185,9 +185,9 @@ function initSqliteSchema(db: DatabaseSync) {
   const defaultSettings = [
     { key: 'globalAiEnabled', value: 'true' },
     { key: 'geminiApiKey', value: process.env.GEMINI_API_KEY || '' },
-    { key: 'pdfCuiabaUrl', value: 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf' },
-    { key: 'pdfVgUrl', value: 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf' },
-    { key: 'pdfOnlineUrl', value: 'https://seupetequilibrado.com.br/materiais/online.pdf' },
+    { key: 'pdfCuiabaUrl', value: 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link' },
+    { key: 'pdfVgUrl', value: 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link' },
+    { key: 'pdfOnlineUrl', value: 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link' },
     { key: 'evolutionInstance', value: process.env.EVOLUTION_INSTANCE_NAME || 'SPE' },
     { key: 'evolutionUrl', value: process.env.EVOLUTION_API_URL || 'https://evolution-api-yweq.onrender.com' },
     { key: 'evolutionApiKey', value: process.env.EVOLUTION_API_KEY || 'Innovary@2026#WhatsAppAPI' }
@@ -200,6 +200,15 @@ function initSqliteSchema(db: DatabaseSync) {
   for (const s of defaultSettings) {
     insertSetting.run(s.key, s.value);
   }
+
+  // Atualização automática dos links oficiais caso ainda estivessem com os placeholders antigos
+  try {
+    db.exec(`
+      UPDATE settings SET value = 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link' WHERE key = 'pdfCuiabaUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+      UPDATE settings SET value = 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link' WHERE key = 'pdfVgUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+      UPDATE settings SET value = 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link' WHERE key = 'pdfOnlineUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+    `);
+  } catch (e) {}
 }
 
 /**
@@ -282,9 +291,9 @@ async function initPostgresSchema(sql: any) {
   const defaultSettings = [
     { key: 'globalAiEnabled', value: 'true' },
     { key: 'geminiApiKey', value: process.env.GEMINI_API_KEY || '' },
-    { key: 'pdfCuiabaUrl', value: 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf' },
-    { key: 'pdfVgUrl', value: 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf' },
-    { key: 'pdfOnlineUrl', value: 'https://seupetequilibrado.com.br/materiais/online.pdf' },
+    { key: 'pdfCuiabaUrl', value: 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link' },
+    { key: 'pdfVgUrl', value: 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link' },
+    { key: 'pdfOnlineUrl', value: 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link' },
     { key: 'evolutionInstance', value: process.env.EVOLUTION_INSTANCE_NAME || 'SPE' },
     { key: 'evolutionUrl', value: process.env.EVOLUTION_API_URL || 'https://evolution-api-yweq.onrender.com' },
     { key: 'evolutionApiKey', value: process.env.EVOLUTION_API_KEY || 'Innovary@2026#WhatsAppAPI' }
@@ -296,6 +305,15 @@ async function initPostgresSchema(sql: any) {
       [s.key, s.value]
     );
   }
+
+  // Atualização automática no Postgres de links legados
+  try {
+    await sql.query(`
+      UPDATE settings SET value = 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link' WHERE key = 'pdfCuiabaUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+      UPDATE settings SET value = 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link' WHERE key = 'pdfVgUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+      UPDATE settings SET value = 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link' WHERE key = 'pdfOnlineUrl' AND (value LIKE '%seupetequilibrado%' OR value = '');
+    `);
+  } catch (e) {}
 
   globalForDb.schemaInitialized = true;
 }

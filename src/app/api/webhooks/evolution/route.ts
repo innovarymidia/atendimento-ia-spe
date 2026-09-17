@@ -137,9 +137,8 @@ export async function processContactBuffer(contactId: number): Promise<{ process
       return { processed: true, reason: 'student_or_human_handoff' };
     }
 
-    // 8. Envio de Material / PDF se solicitado e aplicável
+    // 8. Envio de Material / PDF se solicitado e aplicável (via Link das configurações)
     let pdfSentSuccess = false;
-    let pdfFileName: string | undefined;
     let pdfUrlUsed: string | undefined;
 
     const cityKey = decision.pdfCityTarget || decision.identifiedCity || currentState.facts.city;
@@ -149,28 +148,27 @@ export async function processContactBuffer(contactId: number): Promise<{ process
       const vgPdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
       const onlinePdfRow = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
 
-      let pdfUrl = onlinePdfRow?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
-      let fileName = 'Apresentacao-Online-SPE.pdf';
+      let pdfUrl = onlinePdfRow?.value || 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link';
 
       if (cityKey === 'cuiaba' || cityKey.toLowerCase().includes('cuiab')) {
-        pdfUrl = cuiabaPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf';
-        fileName = 'Apresentacao-Cuiaba-SPE.pdf';
+        pdfUrl = cuiabaPdfRow?.value || 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link';
       } else if (cityKey === 'varzea_grande' || cityKey.toLowerCase().includes('v') || cityKey.toLowerCase().includes('grande')) {
-        pdfUrl = vgPdfRow?.value || 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf';
-        fileName = 'Apresentacao-Varzea-Grande-SPE.pdf';
+        pdfUrl = vgPdfRow?.value || 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link';
       }
 
-      // Envia documento PDF primeiro
-      const mediaRes = await sendWhatsAppMedia(
-        contact.phone,
-        pdfUrl,
-        fileName,
-        'Material Informativo - Seu Pet Equilibrado'
-      );
-
-      pdfSentSuccess = Boolean(mediaRes.success);
-      pdfFileName = fileName;
       pdfUrlUsed = pdfUrl;
+      pdfSentSuccess = true;
+
+      // Substitui placeholders {{PDF_CUIABA}}, {{PDF_VG}}, {{PDF_ONLINE}} pelo link real
+      decision.replyText = decision.replyText
+        .replace(/\{\{PDF_CUIABA\}\}/gi, pdfUrl)
+        .replace(/\{\{PDF_VG\}\}/gi, pdfUrl)
+        .replace(/\{\{PDF_ONLINE\}\}/gi, pdfUrl);
+
+      // Se o link ainda não estiver contido no texto, anexa de forma natural e elegante
+      if (!decision.replyText.includes(pdfUrl)) {
+        decision.replyText += `\n\n📄 Segue o link com o nosso material informativo completo em PDF e valores:\n${pdfUrl}`;
+      }
     }
 
     // 9. Validação pré-envio com Debugger (22 regras de integridade)
@@ -210,16 +208,9 @@ export async function processContactBuffer(contactId: number): Promise<{ process
 
     if (sendResult.success) {
       await executeRun(`
-        INSERT INTO messages (contactId, sender, content, isProcessed, createdAt)
-        VALUES (?, 'assistant', ?, 1, CURRENT_TIMESTAMP)
-      `, [contactId, validation.sanitizedText]);
-
-      if (pdfSentSuccess && pdfFileName) {
-        await executeRun(`
-          INSERT INTO messages (contactId, sender, content, mediaUrl, isProcessed, createdAt)
-          VALUES (?, 'assistant', ?, ?, 1, CURRENT_TIMESTAMP)
-        `, [contactId, `[Documento PDF Enviado: ${pdfFileName}]`, pdfUrlUsed]);
-      }
+        INSERT INTO messages (contactId, sender, content, mediaUrl, isProcessed, createdAt)
+        VALUES (?, 'assistant', ?, ?, 1, CURRENT_TIMESTAMP)
+      `, [contactId, validation.sanitizedText, pdfUrlUsed || null]);
 
       // Atualizar dados cadastrais extraídos
       const updatedDogName = decision.extractedFacts.dogName || contact.dogName;

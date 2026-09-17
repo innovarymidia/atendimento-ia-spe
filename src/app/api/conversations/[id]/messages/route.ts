@@ -51,41 +51,42 @@ export async function POST(
 
     // Se for envio manual de PDF solicitado pelo operador humano no chat
     if (mediaType) {
+      cancelPendingSend(contactId);
+
       let pdfUrl = '';
-      let fileName = '';
+      let cityName = '';
 
       if (mediaType === 'pdf_cuiaba') {
         const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfCuiabaUrl']);
-        pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf';
-        fileName = 'Apresentacao-Cuiaba-SPE.pdf';
+        pdfUrl = row?.value || 'https://drive.google.com/file/d/1g6Dq2xzqtlZTtZCn94H4D46blcovKwOS/view?usp=drive_link';
+        cityName = 'Cuiabá';
       } else if (mediaType === 'pdf_vg') {
         const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfVgUrl']);
-        pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf';
-        fileName = 'Apresentacao-Varzea-Grande-SPE.pdf';
+        pdfUrl = row?.value || 'https://drive.google.com/file/d/1_WQL1Xf27ITH2edyzH4I-f-j2ruuMaio/view?usp=drive_link';
+        cityName = 'Várzea Grande';
       } else {
         const row = await queryOne<{ value: string }>('SELECT value FROM settings WHERE key = ?', ['pdfOnlineUrl']);
-        pdfUrl = row?.value || 'https://seupetequilibrado.com.br/materiais/online.pdf';
-        fileName = 'Apresentacao-Online-SPE.pdf';
+        pdfUrl = row?.value || 'https://drive.google.com/file/d/18dLsAe1CDCL60PdOSN-oWCMlKuadxrOP/view?usp=drive_link';
+        cityName = 'Online';
       }
 
-      const mediaResult = await sendWhatsAppMedia(
-        contact.phone,
-        pdfUrl,
-        fileName,
-        text || 'Material Informativo - Seu Pet Equilibrado'
-      );
+      const msgContent = text
+        ? `${text}\n\n📄 Material Informativo em PDF (${cityName}):\n${pdfUrl}`
+        : `📄 Segue o link com o nosso material informativo completo em PDF e valores (${cityName}):\n${pdfUrl}`;
 
-      const msgContent = text ? `[PDF Enviado: ${fileName}] ${text}` : `[PDF Enviado: ${fileName}]`;
+      const sendResult = await sendWhatsAppText(contact.phone, msgContent);
 
       const insert = await executeRun(`
-        INSERT INTO messages (contactId, sender, content, mediaUrl, createdAt)
-        VALUES (?, 'human', ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO messages (contactId, sender, content, mediaUrl, isProcessed, createdAt)
+        VALUES (?, 'human', ?, ?, 1, CURRENT_TIMESTAMP)
       `, [contactId, msgContent, pdfUrl]);
 
       await executeRun(`
         UPDATE contacts 
         SET pdfSent = 1, 
             pdfSentAt = CURRENT_TIMESTAMP,
+            status = 'atendimento_humano',
+            aiActive = 0,
             lastInteractionAt = CURRENT_TIMESTAMP
         WHERE id = ?
       `, [contactId]);
@@ -94,7 +95,7 @@ export async function POST(
         ? await queryOne<Message>('SELECT * FROM messages WHERE id = ?', [insert.lastInsertRowid])
         : null;
 
-      return NextResponse.json({ message: created, mediaResult });
+      return NextResponse.json({ message: created, sendResult });
     }
 
     if (!text) {
