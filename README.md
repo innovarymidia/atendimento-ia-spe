@@ -1,36 +1,103 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Seu Pet Equilibrado - Atendimento Automatizado com IA & WhatsApp
 
-## Getting Started
+Sistema completo de atendimento inteligente para a empresa **Seu Pet Equilibrado**, especializada em adestramento canino e consultoria comportamental (João Eduardo e Nicolle).
 
-First, run the development server:
+Integra **Next.js**, **Google Gemini**, **Evolution API (WhatsApp)** e uma **Camada de Controle Determinística (Guardrail)** para garantir que a IA atenda exclusivamente novos leads, mantendo silêncio absoluto para alunos, equipe interna, contatos pessoais e bloqueios.
+
+---
+
+## 🐾 Principais Funcionalidades
+
+1. **Camada de Proteção Determinística (Pré-IA)**:
+   - Toda mensagem recebida via WhatsApp é filtrada deterministicamente antes de qualquer chamada de IA.
+   - Contatos cadastrados como **Aluno**, **Ex aluno**, **Equipe**, **Pessoal**, **Parceiro**, **Fornecedor** ou **Bloqueado** não recebem nenhuma mensagem automática.
+2. **Sincronização Direta do WhatsApp**:
+   - Puxa em 1 clique todas as conversas e contatos ativos na Evolution API da empresa.
+3. **Classificação Rápida e em Massa**:
+   - Menu direto na tabela para alterar a categoria de qualquer telefone com 1 clique.
+   - Seleção múltipla por checkboxes para mover centenas de contatos em lote.
+4. **Painel de Conversas ao Vivo (Central de Chat)**:
+   - Interface completa estilo WhatsApp Web com histórico de mensagens.
+   - **Botão "Assumir Atendimento"**: desativa a IA imediatamente (`aiActive = false`) e passa o controle para o atendente humano.
+   - **Botão "Devolver para IA"**: reativa o atendimento automático quando desejado.
+   - Envio de mensagens manuais e envio dos PDFs oficiais pelo operador humano.
+5. **Motor Gemini com as 31 Regras SPE**:
+   - Acolhimento empático com foco exclusivo em reforço positivo (sem métodos aversivos).
+   - Não promete curas nem prazos milagrosos.
+   - Diferencia comportamento de questões veterinárias.
+   - Não repete perguntas de informações já relatadas pelo tutor.
+   - **Regra 30**: Eliminação estrita de travessões longos (`—`), médios (`–`) e conversão de `&` para `" e "`.
+   - Apresentação da Avaliação Inicial e disparo do material em PDF correspondente por cidade:
+     - **Cuiabá**: Presencial com João Eduardo (`PDF_CUIABA`)
+     - **Várzea Grande**: Presencial com João Eduardo (`PDF_VG`)
+     - **Outras Cidades**: Online com Nicolle (`PDF_ONLINE`)
+   - **Transferência Obrigatória**: após o envio do PDF, a IA encerra com mensagem curta e bloqueia respostas automáticas posteriores.
+
+---
+
+## 🛠️ Tecnologias Utilizadas
+
+- **Next.js 16** (App Router, Turbopack)
+- **React 19**
+- **TypeScript** & **Tailwind CSS**
+- **SQLite Nativo** (`node:sqlite` do Node 24)
+- **Google Gemini API** (`@google/genai`)
+- **Evolution API v2** (WhatsApp Webhook, Text & Media)
+- **Lucide Icons**
+
+---
+
+## 🚀 Como Executar
+
+### 1. Clonar e Instalar Dependências
+
+```bash
+git clone https://github.com/.../atendimento-ia-spe.git
+cd atendimento-ia-spe
+npm install
+```
+
+### 2. Configurar Variáveis de Ambiente
+
+Crie o arquivo `.env` baseado no `.env.example`:
+
+```env
+DATABASE_URL="file:./dev.db"
+GEMINI_API_KEY="SUA_CHAVE_GEMINI"
+EVOLUTION_API_URL="https://seu-evolution-api.com"
+EVOLUTION_API_KEY="SUA_CHAVE_EVOLUTION"
+EVOLUTION_INSTANCE_NAME="SPE"
+```
+
+### 3. Rodar em Desenvolvimento
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Acesse [http://localhost:3000](http://localhost:3000) no navegador.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 4. Compilar para Produção
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm start
+```
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## 📡 Configuração do Webhook na Evolution API
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+No painel da Evolution API da sua instância `SPE`, configure a URL do webhook:
+- **Webhook URL**: `https://seu-dominio.com/api/webhooks/evolution`
+- **Eventos Habilitados**: `MESSAGES_UPSERT`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## 🧪 Testes Automatizados
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Para rodar a suíte de testes de guardrail, formatação e rotas:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npx tsx scripts/test-spe-system.ts
+```
