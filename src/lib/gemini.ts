@@ -145,18 +145,41 @@ NOVA MENSAGEM DO TUTOR:
 Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSON estruturado.
 `;
 
+  const candidateModels = [
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-flash-latest'
+  ];
+
   try {
     const ai = await getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        { role: 'user', parts: [{ text: systemInstruction + '\n\n' + userPrompt }] }
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.3
+    let response: any = null;
+    let lastError: any = null;
+
+    for (const modelName of candidateModels) {
+      try {
+        response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            { role: 'user', parts: [{ text: systemInstruction + '\n\n' + userPrompt }] }
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            temperature: 0.3
+          }
+        });
+        if (response && response.text) {
+          break;
+        }
+      } catch (err: any) {
+        console.warn(`[Gemini] Falha com modelo ${modelName}:`, err?.message || err);
+        lastError = err;
       }
-    });
+    }
+
+    if (!response || !response.text) {
+      throw lastError || new Error('Nenhum modelo Gemini respondeu');
+    }
 
     const responseText = response.text || '{}';
     const parsed = JSON.parse(responseText);
