@@ -1,18 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
 import { checkEvolutionConnection } from '@/lib/evolution';
+import { getAllSettings, saveAllSettings } from '@/lib/settings-sync';
 
 export async function GET() {
   try {
-    const db = getDb();
-    const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
-    
-    const settings: Record<string, string> = {};
-    for (const r of rows) {
-      settings[r.key] = r.value;
-    }
-
-    // Checar conexão com a Evolution API em segundo plano
+    const settings = getAllSettings();
     const evoStatus = await checkEvolutionConnection();
 
     return NextResponse.json({
@@ -27,10 +19,10 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const db = getDb();
 
     const allowedKeys = [
       'globalAiEnabled',
+      'geminiApiKey',
       'pdfCuiabaUrl',
       'pdfVgUrl',
       'pdfOnlineUrl',
@@ -39,27 +31,22 @@ export async function POST(req: NextRequest) {
       'evolutionApiKey'
     ];
 
-    const updateStmt = db.prepare(`
-      INSERT INTO settings (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
-
+    const updates: Record<string, string> = {};
     for (const key of allowedKeys) {
       if (body[key] !== undefined) {
-        updateStmt.run(key, String(body[key]));
+        updates[key] = String(body[key]);
       }
     }
 
-    const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
-    const settings: Record<string, string> = {};
-    for (const r of rows) {
-      settings[r.key] = r.value;
-    }
+    // Salva no SQLite E sincroniza com o arquivo .env
+    saveAllSettings(updates);
+
+    const updatedSettings = getAllSettings();
 
     return NextResponse.json({
       success: true,
-      message: 'Configurações atualizadas com sucesso',
-      settings
+      message: 'Configurações salvas e persistidas no banco e no arquivo .env com sucesso!',
+      settings: updatedSettings
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });

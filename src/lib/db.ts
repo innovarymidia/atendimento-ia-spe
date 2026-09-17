@@ -2,26 +2,30 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 
-let dbInstance: DatabaseSync | null = null;
+const globalForDb = globalThis as unknown as {
+  dbInstance?: DatabaseSync;
+};
 
 export function getDb(): DatabaseSync {
-  if (!dbInstance) {
+  if (!globalForDb.dbInstance) {
     const dbPath = path.resolve(process.cwd(), 'dev.db');
     const dbDir = path.dirname(dbPath);
     if (!fs.existsSync(dbDir)) {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
-    dbInstance = new DatabaseSync(dbPath);
-    initSchema(dbInstance);
+    globalForDb.dbInstance = new DatabaseSync(dbPath);
+    initSchema(globalForDb.dbInstance);
   }
-  return dbInstance;
+  return globalForDb.dbInstance;
 }
 
 function initSchema(db: DatabaseSync) {
-  // Ativar foreign keys e WAL mode para performance
+  // Ativar foreign keys e WAL mode para garantir flush e concorrência imediata
   db.exec(`
     PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
 
     CREATE TABLE IF NOT EXISTS contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +75,7 @@ function initSchema(db: DatabaseSync) {
   // Configurações padrão
   const defaultSettings = [
     { key: 'globalAiEnabled', value: 'true' },
+    { key: 'geminiApiKey', value: process.env.GEMINI_API_KEY || '' },
     { key: 'pdfCuiabaUrl', value: 'https://seupetequilibrado.com.br/materiais/cuiaba.pdf' },
     { key: 'pdfVgUrl', value: 'https://seupetequilibrado.com.br/materiais/varzea-grande.pdf' },
     { key: 'pdfOnlineUrl', value: 'https://seupetequilibrado.com.br/materiais/online.pdf' },

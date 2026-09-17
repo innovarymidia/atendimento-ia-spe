@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState } from 'react';
 import {
-  Settings,
   Bot,
   FileText,
   Wifi,
@@ -10,9 +9,11 @@ import {
   Check,
   Save,
   RefreshCw,
-  ExternalLink,
-  ShieldCheck,
-  Info
+  Key,
+  Eye,
+  EyeOff,
+  Sparkles,
+  ShieldCheck
 } from 'lucide-react';
 
 export default function ConfiguracoesPage() {
@@ -20,9 +21,12 @@ export default function ConfiguracoesPage() {
   const [saving, setSaving] = useState<boolean>(false);
   const [testingConnection, setTestingConnection] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const [showGeminiKey, setShowGeminiKey] = useState<boolean>(false);
+  const [showEvolutionKey, setShowEvolutionKey] = useState<boolean>(false);
 
   // Formulário de configurações
   const [globalAi, setGlobalAi] = useState<boolean>(true);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
   const [pdfCuiaba, setPdfCuiaba] = useState<string>('');
   const [pdfVg, setPdfVg] = useState<string>('');
   const [pdfOnline, setPdfOnline] = useState<string>('');
@@ -48,6 +52,7 @@ export default function ConfiguracoesPage() {
       const data = await res.json();
       if (data?.settings) {
         setGlobalAi(data.settings.globalAiEnabled === 'true');
+        setGeminiApiKey(data.settings.geminiApiKey || '');
         setPdfCuiaba(data.settings.pdfCuiabaUrl || '');
         setPdfVg(data.settings.pdfVgUrl || '');
         setPdfOnline(data.settings.pdfOnlineUrl || '');
@@ -75,6 +80,7 @@ export default function ConfiguracoesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           globalAiEnabled: String(globalAi),
+          geminiApiKey,
           pdfCuiabaUrl: pdfCuiaba,
           pdfVgUrl: pdfVg,
           pdfOnlineUrl: pdfOnline,
@@ -83,9 +89,12 @@ export default function ConfiguracoesPage() {
           evolutionInstance
         })
       });
+      const data = await res.json();
       if (res.ok) {
-        setFeedbackMsg('Configurações salvas com sucesso!');
-        setTimeout(() => setFeedbackMsg(''), 4000);
+        setFeedbackMsg('✓ Configurações salvas e persistidas no banco e no arquivo .env com sucesso!');
+        setTimeout(() => setFeedbackMsg(''), 5000);
+      } else {
+        setFeedbackMsg('Erro ao salvar: ' + (data.error || 'Erro desconhecido'));
       }
     } catch (e) {
       console.error(e);
@@ -122,20 +131,20 @@ export default function ConfiguracoesPage() {
       <div className="pb-6 border-b border-slate-800">
         <div className="flex items-center space-x-3">
           <h1 className="text-2xl font-bold text-white tracking-tight">
-            Configurações do Atendimento
+            Configurações do Sistema & Integrações
           </h1>
           <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            Seu Pet Equilibrado
+            Persistência Automática
           </span>
         </div>
         <p className="text-sm text-slate-400 mt-1">
-          Materiais em PDF por cidade, integração WhatsApp Evolution API e controle global da IA
+          Todas as alterações feitas aqui são gravadas no banco de dados e sincronizadas diretamente no arquivo <code>.env</code>
         </p>
       </div>
 
       {feedbackMsg && (
-        <div className="p-3.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-xs font-semibold flex items-center space-x-2">
-          <Check className="w-4 h-4 text-emerald-400" />
+        <div className="p-4 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-xs font-semibold flex items-center space-x-2 animate-in fade-in">
+          <Check className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{feedbackMsg}</span>
         </div>
       )}
@@ -149,7 +158,7 @@ export default function ConfiguracoesPage() {
               <div>
                 <h3 className="text-sm font-bold text-white">IA Geral do Sistema</h3>
                 <p className="text-[11px] text-slate-400">
-                  Interruptor global que ativa ou desativa qualquer resposta automática da IA
+                  Interruptor mestre que ativa ou desativa qualquer resposta automática da IA
                 </p>
               </div>
             </div>
@@ -182,13 +191,52 @@ export default function ConfiguracoesPage() {
           </div>
         </div>
 
-        {/* Bloco 2: PDFs Oficiais por Cidade / Modalidade */}
+        {/* Bloco 2: Chave Google Gemini API */}
+        <div className="bg-slate-850 p-6 rounded-2xl border border-slate-800 space-y-4">
+          <div className="flex items-center space-x-3 pb-3 border-b border-slate-800">
+            <Key className="w-5 h-5 text-purple-400" />
+            <div>
+              <h3 className="text-sm font-bold text-white">Google Gemini API (Inteligência Artificial)</h3>
+              <p className="text-[11px] text-slate-400">
+                Chave utilizada para gerar as respostas humanizadas e analisar o caso dos tutores
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-200 font-semibold mb-1">
+              GEMINI_API_KEY *
+            </label>
+            <div className="relative">
+              <input
+                type={showGeminiKey ? 'text' : 'password'}
+                required
+                placeholder="AQ.Ab8..."
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+                className="w-full pl-3.5 pr-10 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 text-xs font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowGeminiKey(!showGeminiKey)}
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
+              >
+                {showGeminiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              Ao salvar, esta chave é gravada no banco e atualizada no arquivo <code>.env</code>.
+            </span>
+          </div>
+        </div>
+
+        {/* Bloco 3: PDFs Oficiais por Cidade / Modalidade */}
         <div className="bg-slate-850 p-6 rounded-2xl border border-slate-800 space-y-5">
           <div className="flex items-center space-x-3 pb-3 border-b border-slate-800">
             <FileText className="w-5 h-5 text-teal-400" />
             <div>
               <h3 className="text-sm font-bold text-white">
-                Materiais em PDF por Cidade (Regra 18 & 21)
+                Materiais em PDF por Cidade (Regras 18 & 21)
               </h3>
               <p className="text-[11px] text-slate-400">
                 A IA seleciona e envia automaticamente o PDF correto de acordo com a cidade identificada
@@ -241,7 +289,7 @@ export default function ConfiguracoesPage() {
           </div>
         </div>
 
-        {/* Bloco 3: Evolution API (WhatsApp) */}
+        {/* Bloco 4: Evolution API (WhatsApp) */}
         <div className="bg-slate-850 p-6 rounded-2xl border border-slate-800 space-y-5">
           <div className="flex items-center justify-between pb-3 border-b border-slate-800">
             <div className="flex items-center space-x-3">
@@ -285,7 +333,7 @@ export default function ConfiguracoesPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-slate-200 font-semibold mb-1">
-                Evolution API URL
+                Evolution API URL (EVOLUTION_API_URL)
               </label>
               <input
                 type="text"
@@ -297,7 +345,7 @@ export default function ConfiguracoesPage() {
 
             <div>
               <label className="block text-slate-200 font-semibold mb-1">
-                Nome da Instância
+                Nome da Instância (EVOLUTION_INSTANCE_NAME)
               </label>
               <input
                 type="text"
@@ -309,14 +357,23 @@ export default function ConfiguracoesPage() {
 
             <div className="md:col-span-2">
               <label className="block text-slate-200 font-semibold mb-1">
-                Chave da API (ApiKey)
+                Chave da API (EVOLUTION_API_KEY)
               </label>
-              <input
-                type="password"
-                value={evolutionApiKey}
-                onChange={(e) => setEvolutionApiKey(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 text-xs font-mono"
-              />
+              <div className="relative">
+                <input
+                  type={showEvolutionKey ? 'text' : 'password'}
+                  value={evolutionApiKey}
+                  onChange={(e) => setEvolutionApiKey(e.target.value)}
+                  className="w-full pl-3.5 pr-10 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowEvolutionKey(!showEvolutionKey)}
+                  className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-200"
+                >
+                  {showEvolutionKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -350,7 +407,7 @@ export default function ConfiguracoesPage() {
             className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition shadow-sm disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
-            <span>{saving ? 'Salvando Configurações...' : 'Salvar Todas as Configurações'}</span>
+            <span>{saving ? 'Gravando Alterações...' : 'Salvar Todas as Configurações'}</span>
           </button>
         </div>
       </form>

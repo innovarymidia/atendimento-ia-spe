@@ -1,9 +1,14 @@
 import { GoogleGenAI } from '@google/genai';
 import { Contact, Message } from './db';
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || ''
-});
+import { getAllSettings } from './settings-sync';
+
+function getGeminiClient(): GoogleGenAI {
+  const settings = getAllSettings();
+  const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY || '';
+  return new GoogleGenAI({ apiKey });
+}
+
 
 /**
  * Sanitiza o texto rigorosamente para cumprir as regras de formatação:
@@ -140,6 +145,7 @@ Analise a mensagem respeitando rigorosamente as 31 regras e devolva APENAS o JSO
 `;
 
   try {
+    const ai = getGeminiClient();
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [
