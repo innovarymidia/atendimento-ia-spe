@@ -285,8 +285,8 @@ export async function executeRun(sqlQuery: string, params: any[] = []): Promise<
     let idx = 1;
     let convertedSql = sqlQuery.replace(/\?/g, () => `$${idx++}`);
     
-    // Se for INSERT no postgres e queremos o ID de volta
-    if (/^\s*INSERT\s+INTO/i.test(convertedSql) && !/RETURNING/i.test(convertedSql)) {
+    // Se for INSERT no postgres em tabela que possui coluna id (contacts ou messages)
+    if (/^\s*INSERT\s+INTO\s+["']?(contacts|messages)["']?\b/i.test(convertedSql) && !/RETURNING/i.test(convertedSql)) {
       convertedSql += ' RETURNING id';
       const res = await sql.query(convertedSql, params);
       const rows = Array.isArray(res) ? res : (res as any)?.rows || [];
