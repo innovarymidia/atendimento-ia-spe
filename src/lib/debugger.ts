@@ -88,8 +88,8 @@ export function validateAiResponse(params: {
 
   // 5. Pergunta direta do cliente ignorada
   const directQuestions = [
-    { trigger: /como funciona/i, answerKeywords: ['avaliação', 'avaliaçao', 'presencial', 'visita', 'treino', 'comportamento', 'aulas', 'passo'] },
-    { trigger: /quanto custa|qual o valor|preço|preço/i, answerKeywords: ['valor', 'investimento', 'r$', 'avaliação', 'plano', 'orçamento'] },
+    { trigger: /como funciona/i, answerKeywords: ['avaliação', 'avaliaçao', 'presencial', 'visita', 'treino', 'comportamento', 'aulas', 'passo', 'trabalho', 'atendimento', 'comunicação', 'rotina', 'orientar', 'ajudar', 'consultoria'] },
+    { trigger: /quanto custa|qual o valor|preço|preço/i, answerKeywords: ['valor', 'investimento', 'r$', 'avaliação', 'plano', 'orçamento', 'modalidade', 'cidade'] },
     { trigger: /onde fica|endereço|local|vocês são de onde/i, answerKeywords: ['cuiabá', 'várzea grande', 'domiciliar', 'casa', 'residência', 'online'] },
     { trigger: /vocês vão até|atende em casa|domicílio/i, answerKeywords: ['domiciliar', 'casa', 'residência', 'vamos até', 'atendemos'] }
   ];
@@ -144,6 +144,26 @@ export function validateAiResponse(params: {
   const emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2300}-\u{23FF}]/gu;
   if (emojiRegex.test(sanitizedText)) {
     sanitizedText = sanitizedText.replace(emojiRegex, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // 11. Não repetir saudações em conversas em andamento (Regra 4)
+  if (conversationHistory.length > 0) {
+    const repeatedGreetingPrefixes = [
+      /^olá! que bom que (você )?entrou em contato[!,.]?\s*/i,
+      /^olá! que prazer falar com você[!,.]?\s*/i,
+      /^olá! que ótimo que você entrou em contato[!,.]?\s*/i,
+      /^fico feliz que tenha procurado a gente[!,.]?\s*/i,
+      /^seja bem-vindo(a)?[!,.]?\s*/i
+    ];
+    for (const rg of repeatedGreetingPrefixes) {
+      if (rg.test(sanitizedText)) {
+        violations.push(`Saudação repetida em conversa já iniciada: "${sanitizedText.match(rg)?.[0]}".`);
+        sanitizedText = sanitizedText.replace(rg, '').trim();
+        if (sanitizedText.length > 0) {
+          sanitizedText = sanitizedText.charAt(0).toUpperCase() + sanitizedText.slice(1);
+        }
+      }
+    }
   }
 
   const passed = violations.length === 0 || (!shouldHandoffToHuman && violations.every(v => v.includes('detectada') || v.includes('afirmou')));
