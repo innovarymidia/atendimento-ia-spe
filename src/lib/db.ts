@@ -188,8 +188,8 @@ function getPostgresClient() {
 async function initPostgresSchema(sql: any) {
   if (globalForDb.schemaInitialized) return;
 
-  await sql(`
-    CREATE TABLE IF NOT EXISTS contacts (
+  const ddlStatements = [
+    `CREATE TABLE IF NOT EXISTS contacts (
       id SERIAL PRIMARY KEY,
       phone TEXT UNIQUE NOT NULL,
       name TEXT,
@@ -210,28 +210,28 @@ async function initPostgresSchema(sql: any) {
       lastInteractionAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_pg_contacts_phone ON contacts(phone);
-    CREATE INDEX IF NOT EXISTS idx_pg_contacts_status ON contacts(status);
-    CREATE INDEX IF NOT EXISTS idx_pg_contacts_category ON contacts(category);
-
-    CREATE TABLE IF NOT EXISTS messages (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_pg_contacts_phone ON contacts(phone)`,
+    `CREATE INDEX IF NOT EXISTS idx_pg_contacts_status ON contacts(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_pg_contacts_category ON contacts(category)`,
+    `CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
       contactId INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
       sender TEXT NOT NULL,
       content TEXT NOT NULL,
       mediaUrl TEXT,
       createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_pg_messages_contactId ON messages(contactId);
-
-    CREATE TABLE IF NOT EXISTS settings (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_pg_messages_contactId ON messages(contactId)`,
+    `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-  `);
+    )`
+  ];
+
+  for (const stmt of ddlStatements) {
+    await sql.query(stmt);
+  }
 
   const defaultSettings = [
     { key: 'globalAiEnabled', value: 'true' },
@@ -245,7 +245,7 @@ async function initPostgresSchema(sql: any) {
   ];
 
   for (const s of defaultSettings) {
-    await sql(
+    await sql.query(
       `INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
       [s.key, s.value]
     );
@@ -264,8 +264,8 @@ export async function queryAll<T = any>(sqlQuery: string, params: any[] = []): P
     await initPostgresSchema(sql);
     let idx = 1;
     const convertedSql = sqlQuery.replace(/\?/g, () => `$${idx++}`);
-    const rows = await sql(convertedSql, params);
-    return rows as T[];
+    const rows = await sql.query(convertedSql, params);
+    return (Array.isArray(rows) ? rows : (rows as any)?.rows || []) as T[];
   } else {
     const db = getSqliteDb();
     const rows = db.prepare(sqlQuery).all(...params);
@@ -288,16 +288,18 @@ export async function executeRun(sqlQuery: string, params: any[] = []): Promise<
     // Se for INSERT no postgres e queremos o ID de volta
     if (/^\s*INSERT\s+INTO/i.test(convertedSql) && !/RETURNING/i.test(convertedSql)) {
       convertedSql += ' RETURNING id';
-      const res = await sql(convertedSql, params);
+      const res = await sql.query(convertedSql, params);
+      const rows = Array.isArray(res) ? res : (res as any)?.rows || [];
       return {
-        lastInsertRowid: res[0]?.id ? Number(res[0].id) : undefined,
-        changes: res.length
+        lastInsertRowid: rows[0]?.id ? Number(rows[0].id) : undefined,
+        changes: rows.length
       };
     }
 
-    const res = await sql(convertedSql, params);
+    const res = await sql.query(convertedSql, params);
+    const rows = Array.isArray(res) ? res : (res as any)?.rows || [];
     return {
-      changes: Array.isArray(res) ? res.length : 1
+      changes: rows.length || (res as any)?.rowCount || 1
     };
   } else {
     const db = getSqliteDb();
