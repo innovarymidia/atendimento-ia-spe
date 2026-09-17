@@ -26,48 +26,35 @@ export const maxDuration = 60; // 60 segundos de tempo limite para execução de
 /**
  * Worker do Buffer e Envio Inteligente por Contato
  */
-export async function processContactBuffer(contactId: number): Promise<void> {
-  const silenceMs = BUFFER_WINDOW_MS; // 5 segundos de silêncio
-  let keepWaiting = true;
-
-  // 1. Loop de Debounce de Silêncio: espera até que o cliente pare de digitar por 5 segundos
-  while (keepWaiting) {
-    const contact = await queryOne<Contact>(
-      'SELECT id, lastMessageAt FROM contacts WHERE id = ?',
-      [contactId]
-    );
-
-    if (!contact || !contact.lastMessageAt) {
-      return;
-    }
-
-    const lastMsgTime = new Date(contact.lastMessageAt).getTime();
-    const elapsed = Date.now() - lastMsgTime;
-
-    if (elapsed < silenceMs) {
-      const waitTime = silenceMs - elapsed + 100;
-      await new Promise(r => setTimeout(r, waitTime));
-    } else {
-      keepWaiting = false;
-    }
-  }
-
-  // 2. Lock de Concorrência: garante que apenas um worker processe este contato
+export async function processContactBuffer(contactId: number): Promise<{ processed: boolean; reason?: string }> {
+  // 1. Lock de Concorrência: se outro worker já estiver processando este contato, sai imediatamente
   const locked = await acquireLock(contactId);
   if (!locked) {
-    return;
+    return { processed: false, reason: 'concurrency_locked' };
   }
 
   try {
+    // 2. Janela de silêncio para agrupar mensagens consecutivas (3 a 4 segundos)
+    const initialWaitMs = 3500;
+    await new Promise(r => setTimeout(r, initialWaitMs));
+
     // 3. Recupera todas as mensagens do usuário acumuladas no buffer
-    const pendingMessages = await getUnprocessedMessages(contactId);
+    let pendingMessages = await getUnprocessedMessages(contactId);
     if (pendingMessages.length === 0) {
-      return;
+      return { processed: false, reason: 'no_pending_messages' };
+    }
+
+    // Se uma nova mensagem acabou de chegar há menos de 1.5s, dá mais 1.5s de respiro para finalizar o pensamento do tutor
+    const lastMsg = pendingMessages[pendingMessages.length - 1];
+    const lastMsgTime = lastMsg.createdAt ? new Date(lastMsg.createdAt).getTime() : 0;
+    if (lastMsgTime && !isNaN(lastMsgTime) && Date.now() - lastMsgTime < 1500) {
+      await new Promise(r => setTimeout(r, 1500));
+      pendingMessages = await getUnprocessedMessages(contactId);
     }
 
     const contact = await queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contactId]);
     if (!contact) {
-      return;
+      return { processed: false, reason: 'contact_not_found' };
     }
 
     // 4. Guardrail determinístico pré-processamento
@@ -79,7 +66,7 @@ export async function processContactBuffer(contactId: number): Promise<void> {
         details: { reason: guard.reason }
       });
       await markMessagesAsProcessed(pendingMessages.map(m => m.id));
-      return;
+      return { processed: false, reason: 'guardrail_blocked' };
     }
 
     // 5. Consolidação de mensagens em um único bloco de texto
@@ -147,7 +134,7 @@ export async function processContactBuffer(contactId: number): Promise<void> {
       ]);
 
       await markMessagesAsProcessed(pendingMessages.map(m => m.id));
-      return;
+      return { processed: true, reason: 'student_or_human_handoff' };
     }
 
     // 8. Envio de Material / PDF se solicitado e aplicável
@@ -215,29 +202,10 @@ export async function processContactBuffer(contactId: number): Promise<void> {
       `, [` [Transferido para humano: ${validation.handoffReason || 'Debugger'}]`, contactId]);
 
       await markMessagesAsProcessed(pendingMessages.map(m => m.id));
-      return;
+      return { processed: true, reason: 'validation_handoff' };
     }
 
-    // 10. Delay Humano Realista (2 a 4 segundos) com checagem de cancelamento
-    const delayMs = getHumanDelayMs();
-    await new Promise(r => setTimeout(r, delayMs));
-
-    // Se novas mensagens chegaram enquanto esperávamos o delay, aborta envio para incorporar na próxima rodada
-    const checkNewMsgs = await queryOne<{ count: number | string }>(
-      'SELECT COUNT(*) as count FROM messages WHERE contactId = ? AND isProcessed = 0 AND sender = ?',
-      [contactId, 'user']
-    );
-
-    if (checkNewMsgs && Number(checkNewMsgs.count) > 0) {
-      logEvent({
-        eventType: 'DELAY_CANCELLED',
-        contactId,
-        details: { reason: 'Nova mensagem recebida durante delay humano' }
-      });
-      return;
-    }
-
-    // 11. Envio de Mensagem ÚNICA Consolidada
+    // 10. Envio de Mensagem ÚNICA Consolidada via Evolution API
     const sendResult = await sendWhatsAppText(contact.phone, validation.sanitizedText);
 
     if (sendResult.success) {
@@ -335,11 +303,13 @@ export async function processContactBuffer(contactId: number): Promise<void> {
       ]);
     }
 
-    // 12. Marca mensagens como processadas
+    // 11. Marca mensagens como processadas
     await markMessagesAsProcessed(pendingMessages.map(m => m.id));
+    return { processed: true };
 
   } catch (err: any) {
     console.error(`[Webhook Buffer Process] Erro no contato ${contactId}:`, err);
+    return { processed: false, reason: err.message };
   } finally {
     await releaseLock(contactId);
   }
@@ -464,20 +434,11 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 4. Agendamento em background com after() do Next.js
-    if (typeof after === 'function') {
-      after(async () => {
-        await processContactBuffer(contact.id);
-      });
-    } else {
-      processContactBuffer(contact.id).catch(err => {
-        console.error('[Background Buffer Catch]:', err);
-      });
-    }
+    // 4. Executa o processamento do buffer de forma direta e segura
+    const result = await processContactBuffer(contact.id);
 
-    // Retorno 200 OK imediato para a Evolution API não reenviar o webhook
     return NextResponse.json({
-      status: 'queued',
+      status: result.processed ? 'processed' : 'buffered',
       contactId: contact.id,
       messageId: externalId
     });
