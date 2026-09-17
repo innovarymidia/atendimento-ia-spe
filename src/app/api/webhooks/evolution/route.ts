@@ -177,6 +177,7 @@ export async function POST(req: NextRequest) {
           INSERT INTO messages (contactId, sender, content, createdAt)
           VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
         `, [contact.id, decision.assessmentText]);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
       }
 
       // Enviar mensagem de apresentação do PDF
@@ -186,6 +187,7 @@ export async function POST(req: NextRequest) {
           INSERT INTO messages (contactId, sender, content, createdAt)
           VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
         `, [contact.id, decision.replyText]);
+        await new Promise((resolve) => setTimeout(resolve, 1200));
       }
 
       // Enviar o PDF via Evolution API
@@ -195,6 +197,8 @@ export async function POST(req: NextRequest) {
         fileName,
         'Material Informativo - Seu Pet Equilibrado'
       );
+
+      await new Promise((resolve) => setTimeout(resolve, 1200));
 
       // Enviar mensagem curta de encerramento da IA e transferência para equipe humana
       const transferMsg = decision.finalTransferMessage ||
@@ -227,6 +231,18 @@ export async function POST(req: NextRequest) {
     }
 
     // 6. FLUXO CONVERSACIONAL REGULAR
+    // Se a IA apresentou a Avaliação Inicial (Etapa 4), enviar como mensagem própria e separada
+    if (decision.assessmentText) {
+      await sendWhatsAppText(contact.phone, decision.assessmentText);
+      await executeRun(`
+        INSERT INTO messages (contactId, sender, content, createdAt)
+        VALUES (?, 'assistant', ?, CURRENT_TIMESTAMP)
+      `, [contact.id, decision.assessmentText]);
+
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+
+    // Mensagem da conversa ou Apresentação do PDF em mensagem separada (Etapa 5)
     if (decision.replyText) {
       await sendWhatsAppText(contact.phone, decision.replyText);
 
